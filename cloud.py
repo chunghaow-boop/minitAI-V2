@@ -391,14 +391,26 @@ def _find_missing(transcript_text, draft, data_dir, schema):
         },
         "required": ["agenda_items", "action_items", "key_points"],
     }
+    # Truncating to the head meant omissions in the LAST hour of a long meeting
+    # could never be found - the exact case this pass exists for. Sample evenly
+    # across the whole transcript instead.
+    budget = 60000
+    t = transcript_text or ""
+    if len(t) <= budget:
+        sample = t
+    else:
+        n = 6
+        piece = budget // n
+        step = len(t) // n
+        sample = "\n[...]\n".join(t[i * step:i * step + piece] for i in range(n))
     user = ("ALREADY COVERED BY THE DRAFT:\n" + _j.dumps(brief, ensure_ascii=False)
-            + "\n\nFULL TRANSCRIPT:\n" + transcript_text[:60000])
+            + "\n\nTRANSCRIPT (sampled evenly across the whole meeting):\n" + sample)
     # attempts=1: this pass is optional, so it must not hold up the meeting.
     return _one_pass(user, data_dir, sys_p, miss_schema, max_retries=1)
 
 
 def analyze(transcript_text, data_dir, system_prompt, schema,
-            style=DEFAULT_STYLE, completeness_check=True):
+            style=DEFAULT_STYLE, completeness_check=True, focus=""):
     """Summarise a transcript.
 
     Long transcripts are summarised in sections and merged, then checked once
@@ -407,6 +419,16 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
     """
     style_rule = SUMMARY_STYLES.get(style, SUMMARY_STYLES[DEFAULT_STYLE])
     sys_p = system_prompt + "\n\nSTYLE FOR THIS DOCUMENT:\n" + style_rule
+    focus = (focus or "").strip()
+    if focus:
+        # The user's own words. Placed last so it outranks the style, but framed
+        # so it can never override the no-inventing rule: asking for something
+        # the meeting never covered must yield an empty field, not fiction.
+        sys_p += ("\n\nWHAT THIS PARTICULAR READER ASKED FOR:\n" + focus[:600]
+                  + "\n\nGive that request priority when deciding what to "
+                    "include and what to leave out. If the meeting simply did "
+                    "not cover it, say nothing about it rather than inventing "
+                    "content - the no-invention rule still outranks this.")
 
     text = transcript_text or ""
     if len(text) <= MAP_REDUCE_OVER_CHARS:

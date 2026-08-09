@@ -420,6 +420,61 @@ _ja = a.post("/upload", data={"audio": (io.BytesIO(b"y" * 5000), "mine.wav")},
 check("Second user cannot poll the first user's queued job",
       b.get("/job/" + _ja).status_code == 404)
 
+# ----------------------------------- memory, fairness, and the focus box
+check("Finished jobs are evicted", callable(getattr(A, "_evict_old_jobs", None)))
+A.JOBS["old-done"] = {"uid": uid_a, "state": "done", "finished": 0, "created": 0,
+                      "files": {"docx": {"data": "x" * 10000}}}
+A.JOBS["fresh"] = {"uid": uid_a, "state": "done", "finished": time.time(),
+                   "created": time.time()}
+A._evict_old_jobs()
+check("A stale finished job is dropped", "old-done" not in A.JOBS)
+check("A recent finished job is kept", "fresh" in A.JOBS)
+# never evict work still in progress
+A.JOBS["busy"] = {"uid": uid_a, "state": "transcribing", "created": 0}
+A._evict_old_jobs()
+check("A running job is never evicted", "busy" in A.JOBS)
+A.JOBS.pop("busy", None); A.JOBS.pop("fresh", None)
+
+check("Quota updates are serialised", hasattr(A, "_quota_lock"))
+check("There is a per-user queue cap", A.MAX_QUEUED_PER_USER >= 1)
+
+# The completeness pass must see the END of a long meeting, not just the start
+_probe = []
+_cl2.requests.post = lambda url, **kw: (_probe.append(kw.get("json") or {}), _Cap())[1]
+_cl2.get_key = lambda d: "k"
+try:
+    _head = "AWAL " * 12000
+    _tail = "PENGHUJUNG MESYUARAT PENTING "
+    _cl2._find_missing(_head + _tail, {"agenda_items": []}, "/tmp",
+                       A.engine.ANALYSIS_SCHEMA)
+    _sent_txt = _probe[-1]["messages"][1]["content"]
+    check(f"Completeness pass samples the whole meeting ({len(_sent_txt)} chars)",
+          "PENGHUJUNG" in _sent_txt)
+    check("Sampling is signposted to the model", "sampled evenly" in
+          _probe[-1]["messages"][1]["content"] or "sampled evenly" in
+          _probe[-1]["messages"][0]["content"])
+
+    # The user's own request must reach the model, without defeating grounding
+    _probe.clear()
+    _cl2.analyze("Mesyuarat bajet.", "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA,
+                 focus="only the budget decisions", completeness_check=False)
+    _sys = _probe[0]["messages"][0]["content"]
+    check("The user's own request reaches the model", "only the budget decisions" in _sys)
+    check("The no-invention rule still outranks it", "outranks this" in _sys)
+    # and it must be length-capped so it cannot be used to rewrite the prompt
+    _probe.clear()
+    _cl2.analyze("x", "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA,
+                 focus="A" * 5000, completeness_check=False)
+    check("An over-long request is truncated",
+          _probe[0]["messages"][0]["content"].count("A") < 1000)
+finally:
+    _cl2.requests.post = _op3
+    _cl2.get_key = _okey
+
+_pg4 = client().get("/").data.decode()
+check("The focus box is in the UI", 'id="focus"' in _pg4)
+check("The focus box is sent to the server", "fd.append('focus'" in _pg4)
+
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

@@ -157,12 +157,37 @@ def read_token(tok):
 # =========================================================================
 # Job queue - one worker, so a burst of uploads cannot exhaust the free tier
 # =========================================================================
+# Finished jobs hold base64 copies of the Word, PowerPoint and transcript
+# files. Kept forever on a 512 MB instance that is a slow memory leak, so old
+# jobs are evicted once the browser has had a fair chance to collect them.
 JOBS = {}
+JOB_TTL_SECONDS = int(os.environ.get("MINITAI_JOB_TTL", "1800"))   # 30 minutes
+MAX_JOBS_RETAINED = int(os.environ.get("MINITAI_MAX_JOBS", "60"))
 _jobs_lock = threading.Lock()
 _work = queue.Queue()
+# A queue nobody can flood: one person cannot park fifty meetings ahead of
+# everyone else.
+MAX_QUEUED_PER_USER = int(os.environ.get("MINITAI_MAX_QUEUED", "3"))
+
+
+def _evict_old_jobs():
+    """Drop finished jobs that are past their TTL, and cap the total kept."""
+    now = time.time()
+    with _jobs_lock:
+        for jid in [j for j, v in JOBS.items()
+                    if v.get("state") in ("done", "error", "lost")
+                    and now - v.get("finished", now) > JOB_TTL_SECONDS]:
+            JOBS.pop(jid, None)
+        if len(JOBS) > MAX_JOBS_RETAINED:
+            oldest = sorted(JOBS.items(),
+                            key=lambda kv: kv[1].get("created", 0))
+            for jid, _v in oldest[:len(JOBS) - MAX_JOBS_RETAINED]:
+                JOBS.pop(jid, None)
 
 
 def _set(job_id, **kw):
+    if kw.get("state") in ("done", "error"):
+        kw.setdefault("finished", time.time())
     with _jobs_lock:
         JOBS.setdefault(job_id, {}).update(kw)
 
@@ -184,6 +209,10 @@ def _worker():
                        "Please try again.", detail=type(e).__name__)
         finally:
             _work.task_done()
+            try:
+                _evict_old_jobs()
+            except Exception:
+                pass
 
 
 def _run_job(job_id):
@@ -209,7 +238,8 @@ def _run_job(job_id):
         _set(job_id, state="summarising", progress=92)
         data = cloud.analyze(text, DATA_ROOT, engine.SYSTEM_PROMPT,
                              engine.ANALYSIS_SCHEMA,
-                             style=job.get("style") or cloud.DEFAULT_STYLE)
+                             style=job.get("style") or cloud.DEFAULT_STYLE,
+                             focus=job.get("focus") or "")
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
         data = engine._drop_hallucinations(data, text)
@@ -258,7 +288,17 @@ def _quota_path(uid):
     return os.path.join(user_dir(uid), "quota.json")
 
 
+_quota_lock = threading.Lock()
+
+
 def check_and_add_quota(uid, minutes):
+    """Serialised: gunicorn runs 8 request threads, so two simultaneous uploads
+    could otherwise both read the old total and one would overwrite the other."""
+    with _quota_lock:
+        return _check_and_add_quota_locked(uid, minutes)
+
+
+def _check_and_add_quota_locked(uid, minutes):
     today = time.strftime("%Y-%m-%d")
     p = _quota_path(uid)
     try:
@@ -418,11 +458,21 @@ def upload():
                                  f"{MAX_MINUTES_PER_USER_PER_DAY} minutes today. "
                                  f"The allowance resets at midnight."}), 429
 
+    with _jobs_lock:
+        mine = sum(1 for v in JOBS.values()
+                   if v.get("uid") == uid and v.get("state") in
+                   ("queued", "transcribing", "reading", "summarising", "writing"))
+    if mine >= MAX_QUEUED_PER_USER:
+        os.remove(path)
+        return jsonify({"error": f"You already have {mine} recordings being "
+                                 f"processed. Wait for those to finish first."}), 429
+
     job_id = secrets.token_urlsafe(12)
     _set(job_id, uid=uid, audio=path, kind=("doc" if is_doc else "audio"),
          state="queued", progress=0,
          lang=(request.form.get("lang") or "").strip(),
          style=(request.form.get("style") or cloud.DEFAULT_STYLE).strip(),
+         focus=(request.form.get("focus") or "").strip()[:600],
          hints=(request.form.get("hints") or "").strip()[:400],
          created=time.time())
     _work.put(job_id)
@@ -549,8 +599,19 @@ a.file:hover{border-color:var(--blue)}
     <option value="actions">Action list &mdash; who does what, by when</option>
   </select>
 
-  <label for="hints">Names and acronyms (optional, helps spelling)</label>
-  <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Bil 1/2026">
+  <label for="focus">Anything specific you want from this meeting? (optional)</label>
+  <div class="note" style="margin:0 0 6px">
+    Ask in your own words and the summary will prioritise it. If the meeting
+    did not cover it, MinitAI says nothing rather than making something up.</div>
+  <input id="focus" maxlength="600"
+         placeholder="e.g. only the budget decisions &middot; what was agreed about the intake &middot; every deadline given to me">
+
+  <label for="hints">Names it might not know (optional)</label>
+  <div class="note" style="margin:0 0 6px">
+    MinitAI has never heard your colleagues' names or your department's
+    abbreviations, so it guesses at the spelling. List them here and it will
+    get them right.</div>
+  <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Prof Lim, Bil 1/2026">
 
   <button id="go" disabled>Choose a recording first</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
@@ -598,6 +659,7 @@ $('go').onclick=async()=>{
   const fd=new FormData();fd.append('audio',file);
   fd.append('lang',$('lang').value);fd.append('hints',$('hints').value);
   fd.append('style',$('style').value);
+  fd.append('focus',$('focus').value);
   const {ok,j}=await api('/upload',{method:'POST',body:fd});
   if(!ok){fail(j.error||'Upload failed.');return;}
   $('msg').textContent=j.queued_ahead>0
