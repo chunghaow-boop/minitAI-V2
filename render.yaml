@@ -15,5 +15,11 @@ services:
         sync: false
       - key: MINITAI_RETENTION_HOURS
         value: "24"
+      # Per person per day. Twenty friends x 240 would drain the shared free
+      # Groq account before lunch; 60 minutes each is a real meeting a day.
       - key: MINITAI_DAILY_MINUTES
-        value: "240"
+        value: "60"
+      # The whole server's daily audio budget, kept under the free tier so the
+      # account is never exhausted mid-meeting.
+      - key: MINITAI_SERVICE_DAILY_MINUTES
+        value: "400"
