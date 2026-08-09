@@ -129,6 +129,83 @@ check("Quota blocks over-use", A.check_and_add_quota(_uid_q, 500)[0] is False)
 check("One user's quota does not affect another",
       A.check_and_add_quota(A._user_id_for("other-probe-user"), 10)[0] is True)
 
+
+# ------------------------------------------------- refresh / recovery
+# A browser refresh, a closed tab or a phone locking its screen used to
+# destroy the meeting silently: the job finished server-side and nobody ever
+# received the documents, while the minutes had already been deducted.
+check("Anonymous cannot list recent work", client().get("/recent").status_code == 401)
+
+A._set("live-job-a", uid=uid_a, state="transcribing", progress=40, created=time.time())
+rec = a.get("/recent").get_json()
+check("A running job is offered back after a refresh",
+      any(j["id"] == "live-job-a" for j in rec["active"]))
+check("Another user never sees that job",
+      not any(j["id"] == "live-job-a" for j in b.get("/recent").get_json()["active"]))
+check("Recent lists files still on disk",
+      any(f["name"] == secret_name for f in rec["files"]))
+check("Recent file links are signed, not bare names",
+      all(f["url"].startswith("/get/") and secret_name not in f["url"]
+          for f in rec["files"]))
+check("Recent never leaks the internal path or owner",
+      "audio" not in json.dumps(rec) and uid_a not in json.dumps(rec))
+_recf = rec["files"][0]["url"].split("/get/")[1]
+check("A link from Recent actually downloads", a.get("/get/" + _recf).status_code == 200)
+check("Another user cannot use a link from Recent",
+      b.get("/get/" + _recf).status_code == 403)
+check("Finished jobs come back too, not just running ones",
+      any(j["id"] == "job-of-a" for j in a.get("/recent").get_json()["finished"]))
+
+# the page has to actually try to recover, or the endpoint is decoration
+_p = client().get("/").data.decode()
+check("Page reconnects to a running job on load", "resume(" in _p and "/recent" in _p)
+check("Page warns before you navigate away mid-job", "beforeunload" in _p)
+check("Only one file downloads automatically (browsers block the rest)",
+      _p.count("first.click()") == 1)
+check("There is a way to sign out", "signout" in _p)
+
+# ------------------------------------------------- shared service budget
+# Everyone here shares ONE free Groq account. Per-user limits alone let twenty
+# people drain it before lunch, and every meeting then fails halfway.
+_svc = A.SERVICE_DAILY_MINUTES
+A.SERVICE_DAILY_MINUTES = 5
+try:
+    os.remove(A._SERVICE_QUOTA)
+except OSError:
+    pass
+_svc_u1 = A._user_id_for("svc-probe-1")
+_svc_u2 = A._user_id_for("svc-probe-2")
+ok1, _ = A.check_and_add_quota(_svc_u1, 4)
+_before = json.load(open(A._quota_path(_svc_u2))).get("minutes", 0) \
+    if os.path.exists(A._quota_path(_svc_u2)) else 0
+ok2, _ = A.check_and_add_quota(_svc_u2, 4)
+check("Service-wide budget stops the shared account being drained",
+      ok1 is True and ok2 == "service")
+_after = json.load(open(A._quota_path(_svc_u2))).get("minutes", 0) \
+    if os.path.exists(A._quota_path(_svc_u2)) else 0
+check("A refused upload does not silently eat the user's own minutes",
+      _after == _before)
+A.SERVICE_DAILY_MINUTES = _svc
+try:
+    os.remove(A._SERVICE_QUOTA)
+except OSError:
+    pass
+
+
+# ------------------------------------------------- session hardening
+_sc = client().post("/login", json={"code": "alpha-code-111"}).headers.get("Set-Cookie", "")
+check("Session cookie is HttpOnly", "HttpOnly" in _sc)
+check("Session cookie is same-site", "SameSite" in _sc)
+check("Session cookie is HTTPS-only", "Secure" in _sc)
+
+# ------------------------------------------------- queue position
+A._set("q1", uid=uid_b, state="queued", created=1000.0)
+A._set("q2", uid=uid_a, state="queued", created=2000.0)
+_q = a.get("/job/q2").get_json()
+check("A queued job is told how many are ahead of it", _q.get("ahead") == 1)
+check("Queue position is shown to the user", "ahead" in client().get("/").data.decode())
+A.JOBS.pop("q1", None); A.JOBS.pop("q2", None)
+
 # ------------------------------------------------------------ headers/health
 h = client().get("/")
 check("Home page renders", h.status_code == 200 and b"MinitAI" in h.data)
@@ -229,7 +306,7 @@ check("Job results carry the files inline", "b64encode" in open("app.py").read()
 check("There is a size cap on inline delivery", "INLINE_LIMIT_BYTES" in open("app.py").read())
 _page2 = client().get("/").data.decode()
 check("Page builds downloads from inline bytes", "createObjectURL" in _page2)
-check("Page saves the files automatically", "a.click()" in _page2)
+check("Page saves the minutes automatically", "first.click()" in _page2)
 check("Page still falls back to the server link", "a.href=v.url" in _page2)
 check("Expired-link message explains the real cause and the fix",
       "goes to sleep" in open("app.py").read()
