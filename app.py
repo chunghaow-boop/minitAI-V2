@@ -577,8 +577,21 @@ def _headers(r):
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["X-Frame-Options"] = "DENY"
     r.headers["Referrer-Policy"] = "no-referrer"
-    r.headers["Content-Security-Policy"] = \
-        "default-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    # Google sign-in and Drive are the only things allowed off-origin, and only
+    # the exact hosts they need. Without these the Drive button silently fails
+    # with "could not reach Google" - the browser refuses the script before the
+    # request is ever made.
+    r.headers["Content-Security-Policy"] = (
+        "default-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' https://accounts.google.com "
+        "https://apis.google.com https://ssl.gstatic.com "
+        "https://www.gstatic.com; "
+        "connect-src 'self' https://accounts.google.com "
+        "https://oauth2.googleapis.com https://www.googleapis.com; "
+        "frame-src https://accounts.google.com https://content.googleapis.com; "
+        "img-src 'self' data: https://*.googleusercontent.com "
+        "https://ssl.gstatic.com https://www.gstatic.com;"
+    )
     return r
 
 

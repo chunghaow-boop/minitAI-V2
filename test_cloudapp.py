@@ -220,6 +220,29 @@ check("Clickjacking header set", h.headers.get("X-Frame-Options") == "DENY")
 check("MIME sniffing disabled", h.headers.get("X-Content-Type-Options") == "nosniff")
 check("CSP present", "default-src" in (h.headers.get("Content-Security-Policy") or ""))
 check("Referrer suppressed", h.headers.get("Referrer-Policy") == "no-referrer")
+# Every off-origin host the page actually talks to must be in the CSP, or the
+# browser blocks it before the request leaves - which is invisible in testing.
+_csp = h.headers.get("Content-Security-Policy") or ""
+_sd = dict(
+    p.strip().split(" ", 1) for p in _csp.split(";") if p.strip() and " " in p.strip()
+)
+check("CSP allows Google's sign-in script",
+      "https://accounts.google.com" in _sd.get("script-src", ""))
+check("CSP allows the Drive API calls",
+      "https://www.googleapis.com" in _sd.get("connect-src", "")
+      and "https://oauth2.googleapis.com" in _sd.get("connect-src", ""))
+check("CSP allows Google's sign-in frame",
+      "https://accounts.google.com" in _sd.get("frame-src", ""))
+check("CSP still refuses everything else by default",
+      _sd.get("default-src", "").strip() == "'self' 'unsafe-inline'")
+import re as _csp_re
+_hosts = set(_csp_re.findall(r"https://[a-z0-9.\-]+", h.data.decode()))
+_allowed = set(_csp_re.findall(r"https://[a-z0-9.*\-]+", _csp)) | {
+    "https://mail.google.com", "https://wa.me", "https://api.whatsapp.com"}
+_missing = sorted(u for u in _hosts
+                  if not any(a.replace("*.", "") in u for a in _allowed))
+check("No page URL is missing from the CSP: " + (", ".join(_missing) or "none"),
+      not _missing)
 hp = client().get("/health").get_json()
 check("Health endpoint works", hp.get("ok") is True)
 check("Health endpoint leaks no secrets",
