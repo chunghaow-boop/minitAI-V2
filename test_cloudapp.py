@@ -228,15 +228,20 @@ check("Health endpoint leaks no secrets",
 # ------------------------------------------------------------ page content
 page = h.data.decode()
 check("Page states audio is uploaded",
-      "an AI service in the United" in " ".join(page.split()))
+      "Groq in the United States" in " ".join(page.split()))
 check("Page discloses the transfer out of Malaysia",
       "outside Malaysia" in " ".join(page.split()))
 check("Page offers a way to delete everything", 'id="wipeBtn"' in page)
 _flat_page = " ".join(page.split())
 check("Page is honest about where documents live",
-      "copy stays on the server" in _flat_page
-      and "that copy goes when the server sleeps" in _flat_page
-      and "Save them somewhere you will find them again" in _flat_page)
+      "short-lived copy stays on the server" in _flat_page
+      and "that copy goes when the server sleeps" in _flat_page)
+check("The full privacy text is one tap away, not hidden",
+      'id="privLink"' in page and 'id="priv"' in page)
+check("Microphone is requested before the meeting, not during",
+      "async function micCheck" in page and "Allow it now" in page)
+check("A blocked microphone is explained, not silently ignored",
+      "The microphone is blocked for this site" in page)
 check("Page points confidential users to the desktop version",
       "desktop version" in page and "never uploads" in page)
 # Nothing may be FETCHED from the internet - no third-party script, stylesheet,

@@ -906,9 +906,20 @@ a.file:hover{border-color:var(--blue)}
 .note{font-size:12px;color:var(--muted);line-height:1.6;margin-top:14px}
 .hide{display:none}
 /* --- live recording --- */
-#recBar{display:flex;gap:9px;margin-top:10px}
+#recBar{display:flex;gap:9px}
 button.rec{background:var(--card2);border:1px solid var(--line);color:var(--txt);
 font-size:13px;padding:11px 8px;border-radius:10px}
+button.rec.big{flex:1;padding:18px 10px;font-size:14px;font-weight:600;
+display:flex;flex-direction:column;align-items:center;gap:7px;
+background:linear-gradient(165deg,#232a3d,#1b2130);border-color:#33405c}
+button.rec.big:hover:not(:disabled){border-color:var(--blue);
+background:linear-gradient(165deg,#28324a,#1d2436)}
+button.rec.big .ic{font-size:19px;color:var(--blue);line-height:1}
+#recMic .ic{color:#F87171}
+#orRow{display:flex;align-items:center;gap:10px;margin:14px 0 10px;
+color:var(--muted);font-size:12px}
+#orRow:before,#orRow:after{content:'';flex:1;height:1px;background:var(--line)}
+#drop{padding:20px 16px}
 button.rec:hover:not(:disabled){border-color:var(--blue)}
 #recLive{border:1px solid var(--red);border-radius:12px;padding:14px;margin-top:10px;
 text-align:center}
@@ -940,13 +951,21 @@ padding:14px;margin-top:12px}
 #preview .dec{color:var(--muted)}
 #preview .more{font-size:12px;color:var(--muted);margin-top:8px}
 /* --- help bubble --- */
-#helpBubble{position:fixed;right:18px;bottom:18px;width:54px;height:54px;
-border-radius:50%;background:var(--blue);border:0;cursor:pointer;padding:0;
-box-shadow:0 6px 18px rgba(0,0,0,.45);z-index:50;width:54px}
-#helpFace{display:block;color:#fff;font-size:13px;letter-spacing:3px;
-animation:blink 4.5s infinite;transform:translateY(-2px)}
-@keyframes blink{0%,92%,100%{opacity:1}95%{opacity:.15}}
-#helpBubble:hover{transform:scale(1.06)}
+#helpBubble{position:fixed;right:18px;bottom:18px;width:60px;height:60px;
+border-radius:50%;background:linear-gradient(160deg,#3B5BDB,#2B3EA8);border:0;
+cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;
+box-shadow:0 8px 22px rgba(0,0,0,.5);z-index:50;transition:transform .18s}
+#helpBubble:hover{transform:translateY(-3px) scale(1.05)}
+#botBob{transform-origin:24px 30px;animation:bob 3.6s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0) rotate(0)}
+50%{transform:translateY(-1.6px) rotate(-2deg)}}
+#botEyes{animation:botblink 5.2s infinite}
+@keyframes botblink{0%,94%,100%{transform:scaleY(1)}
+96%{transform:scaleY(.12)}}
+#botEyes{transform-origin:24px 24px}
+#helpBubble:hover #botSmile{d:path('M19 32q5 3.6 10 0')}
+#botPing{position:absolute;top:4px;right:4px;width:11px;height:11px;
+border-radius:50%;background:#FFD500;box-shadow:0 0 0 2px #1a1d27}
 #helpPanel{position:fixed;right:18px;bottom:84px;width:min(340px,calc(100vw - 36px));
 background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;
 box-shadow:0 10px 30px rgba(0,0,0,.5);z-index:50}
@@ -980,20 +999,22 @@ text-transform:uppercase;letter-spacing:.4px}
 </div>
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
-  <div id="drop">Tap to choose a file &mdash; or drop it here<br>
-    <span style="font-size:12px">
-      <b>Recording</b>: mp3, mp4, m4a, wav, mov, mkv, phone voice memos &mdash;
-      video has its audio pulled out automatically.<br>
-      <b>Document</b>: pdf, docx, pptx, txt &mdash; summarise a report, a lecture
-      deck or teaching material. No recording needed.</span></div>
+  <div id="recBar">
+    <button type="button" class="rec big" id="recMic">
+      <span class="ic">&#9679;</span>Record the room</button>
+    <button type="button" class="rec big" id="recTab">
+      <span class="ic">&#9974;</span>Record an online meeting</button>
+  </div>
+  <div class="note" id="recNote" style="margin-top:6px"></div>
+  <div class="note hide" id="micWarn" style="margin-top:6px"></div>
+
+  <div id="orRow"><span>or</span></div>
+  <div id="drop">Choose a recording &mdash; or drop it here<br>
+    <span style="font-size:12px">audio, video, or a PDF / Word / PowerPoint to
+      summarise</span></div>
   <input id="file" type="file" class="hide"
          accept="audio/*,video/*,.pdf,.docx,.pptx,.ppt,.txt,.md">
 
-  <div id="recBar">
-    <button type="button" class="rec" id="recMic">Record the room</button>
-    <button type="button" class="rec" id="recTab">Record an online meeting</button>
-  </div>
-  <div class="note" id="recNote" style="margin-top:8px"></div>
 
   <div id="recLive" class="hide">
     <div><span id="recDot"></span><span id="recTime">0:00</span></div>
@@ -1027,22 +1048,19 @@ text-transform:uppercase;letter-spacing:.4px}
 
   <label for="focus">Anything specific you want from this meeting? (optional)</label>
   <div class="note" style="margin:0 0 6px">
-    Ask in your own words and the summary will prioritise it. If the meeting
-    did not cover it, MinitAI says nothing rather than making something up.</div>
+    If the meeting did not cover it, MinitAI says nothing rather than
+    inventing.</div>
   <input id="focus" maxlength="600"
          placeholder="e.g. only the budget decisions &middot; what was agreed about the intake &middot; every deadline given to me">
 
   <label for="hints">Names it might not know (optional)</label>
   <div class="note" style="margin:0 0 6px">
-    MinitAI has never heard your colleagues' names or your department's
-    abbreviations, so it guesses at the spelling. List them here and it will
-    get them right.</div>
+    Abbreviations, course codes, anything unusual.</div>
   <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Prof Lim, Bil 1/2026">
 
   <label for="prev">Last meeting's minutes (optional)</label>
-  <div class="note" style="margin:0 0 6px">Attach them and the summary opens
-    with <b>Perkara Berbangkit</b> &mdash; what was carried over from last time.
-    The file is read once and never kept.</div>
+  <div class="note" style="margin:0 0 6px">Opens the summary with
+    <b>Perkara Berbangkit</b>. Read once, never kept.</div>
   <input id="prev" type="file" accept=".pdf,.docx,.txt,.md"
          style="width:100%;background:var(--card2);border:1px solid var(--line);
                 border-radius:10px;color:var(--muted);font-size:13px;padding:9px">
@@ -1051,15 +1069,13 @@ text-transform:uppercase;letter-spacing:.4px}
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
       <input type="checkbox" id="speakers" style="width:auto;margin:0">
       <span>Label who said what</span></label>
-    <div class="note" style="margin:2px 0 0">Uses a second service
-      (AssemblyAI) that can tell voices apart. Slower, and your audio goes
-      there instead of Groq.</div>
+    <div class="note" style="margin:2px 0 0">Slower. Audio goes to AssemblyAI
+      instead of Groq.</div>
   </div>
 
   <label for="roster">Who was there? (optional)</label>
-  <div class="note" style="margin:0 0 6px">One name per line. This fills the
-    KEHADIRAN section, tells the transcriber how the names are spelt, and stops
-    it inventing people who were only mentioned.</div>
+  <div class="note" style="margin:0 0 6px">One per line. Fills KEHADIRAN and
+    fixes the spelling.</div>
   <textarea id="roster" rows="3"
     placeholder="Dr. Hafizah&#10;Prof. Madya Dr. Maurin&#10;Puan Marja"
     style="width:100%;background:var(--card2);border:1px solid var(--line);
@@ -1070,7 +1086,7 @@ text-transform:uppercase;letter-spacing:.4px}
 
   <button id="go" disabled>Choose a recording first</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
-  <div class="msg" id="msg"></div>
+  <div class="msg" id="msg" role="status" aria-live="polite"></div>
   <div id="preview" class="hide"></div>
   <div id="files"></div>
 
@@ -1112,25 +1128,43 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
   <div class="note" style="text-align:right">
     <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
-  <div class="note">Your audio is sent to <b>Groq, an AI service in the United
-    States</b>, to be transcribed, then deleted there. That is a transfer of
-    your recording outside Malaysia &mdash; by uploading, you are agreeing to it,
-    and you should have everyone's agreement before recording them at all.
-    Your documents are handed straight to your browser; a short-lived copy
-    stays on the server so a refresh cannot lose them, and that copy goes when
-    the server sleeps. Save them somewhere you will find them again.
-    For confidential meetings, use the desktop version, which never uploads
-    anything.</div>
-  <button type="button" class="rec" id="wipeBtn"
-          style="width:100%;margin-top:10px">Delete everything of mine on the server</button>
-  <div class="note hide" id="wipeMsg"></div>
+  <div class="note">Audio goes to <b>Groq in the United States</b> to be
+    transcribed. Not for confidential meetings.
+    <a href="#" id="privLink" style="color:var(--muted)">Privacy and your data</a></div>
+  <div id="priv" class="hide">
+    <div class="note">Sending your recording to Groq is a transfer outside
+      Malaysia &mdash; by uploading you agree to it, and you should have
+      everyone's agreement before recording them at all. Groq deletes the audio
+      after transcribing. Documents are handed straight to your browser; a
+      short-lived copy stays on the server so a refresh cannot lose them, and
+      that copy goes when the server sleeps. For confidential meetings use the
+      desktop version, which never uploads anything.</div>
+    <button type="button" class="rec" id="wipeBtn"
+            style="width:100%;margin-top:8px">Delete everything of mine on the server</button>
+    <div class="note hide" id="wipeMsg"></div>
+  </div>
 </div>
 
 <!-- Help lives in a corner, not in the page. The old version put it 3,200px
      down a 4,100px page: you pressed Ask, the answer rendered far below the
      fold, and it looked broken. -->
 <button type="button" id="helpBubble" aria-label="Help">
-  <span id="helpFace">&#9679;&#9679;</span></button>
+  <svg id="bot" viewBox="0 0 48 48" width="40" height="40" aria-hidden="true">
+    <g id="botBob">
+      <line x1="24" y1="7" x2="24" y2="12" stroke="#BFD3FF" stroke-width="2"/>
+      <circle cx="24" cy="5" r="2.6" fill="#FFD500"/>
+      <rect x="8" y="12" width="32" height="24" rx="9" fill="#EAF0FF"/>
+      <rect x="13" y="18" width="22" height="12" rx="6" fill="#1E2761"/>
+      <g id="botEyes" fill="#8FB4FF">
+        <circle cx="19.5" cy="24" r="2.7"/><circle cx="28.5" cy="24" r="2.7"/>
+      </g>
+      <path id="botSmile" d="M20 32.5q4 2.6 8 0" stroke="#9FB2D8"
+            stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      <rect x="3" y="21" width="4" height="7" rx="2" fill="#CBD9FF"/>
+      <rect x="41" y="21" width="4" height="7" rx="2" fill="#CBD9FF"/>
+    </g>
+  </svg>
+  <span id="botPing" class="hide"></span></button>
 <div id="helpPanel" class="hide">
   <div id="helpHead"><b>MinitAI help</b>
     <span id="helpClose" role="button" aria-label="Close">&times;</span></div>
@@ -1211,6 +1245,7 @@ function fmt(s){
 
 async function recStartMode(mode){
   if(rec||running) return;
+  if(await micState()==='denied'){ micBlocked(); return; }
   recChunks=[]; recStreams=[];
   var ac, dest, gotTab=false;
   try{
@@ -1418,6 +1453,49 @@ $('wipeBtn').onclick=async function(){
   $('wipeBtn').textContent='Delete everything of mine on the server';
 };
 
+// ------------------------------------------------------------ microphone
+// Ask once, on the way in. Discovering the browser has blocked the microphone
+// AFTER an hour-long meeting is the worst possible moment to find out, and the
+// prompt only appears when you press Record, which is exactly too late.
+async function micState(){
+  try{
+    if(!navigator.permissions || !navigator.permissions.query) return 'unknown';
+    var st = await navigator.permissions.query({name:'microphone'});
+    return st.state;                       // granted | denied | prompt
+  }catch(e){ return 'unknown'; }
+}
+function micBlocked(){
+  $('micWarn').classList.remove('hide');
+  $('micWarn').innerHTML='<b>The microphone is blocked for this site.</b> '
+    +'Recording will capture nothing. Click the padlock in the address bar, '
+    +'set Microphone to Allow, then reload.';
+  $('recMic').disabled=true; $('recTab').disabled=true;
+}
+async function askMic(){
+  try{
+    var st=await navigator.mediaDevices.getUserMedia({audio:true});
+    st.getTracks().forEach(function(t){ t.stop(); });   // we only wanted the yes
+    $('micWarn').classList.add('hide');
+    $('recMic').disabled=false;
+    if(CAN_TAB) $('recTab').disabled=false;
+    return true;
+  }catch(e){ micBlocked(); return false; }
+}
+async function micCheck(){
+  if(!CAN_MIC) return;
+  var st=await micState();
+  if(st==='denied'){ micBlocked(); return; }
+  if(st==='granted'){ $('micWarn').classList.add('hide'); return; }
+  // Not decided yet: explain before the browser bar appears, so the question
+  // makes sense when it does.
+  $('micWarn').classList.remove('hide');
+  $('micWarn').innerHTML='MinitAI needs your microphone to record. '
+    +'<a href="#" id="micAsk" style="color:var(--blue)">Allow it now</a> '
+    +'so it is ready before your meeting starts.';
+  var link=document.getElementById('micAsk');
+  if(link) link.onclick=function(e){ e.preventDefault(); askMic(); };
+}
+
 // --------------------------------------------------------------- history
 // Meetings are remembered in this browser because the server cannot keep them:
 // its disk is wiped whenever the free instance sleeps.
@@ -1496,6 +1574,11 @@ $('fbLink').onclick=function(e){
 };
 
 try{ histRender(); }catch(e){}
+try{ micCheck(); }catch(e){}
+
+$('privLink').onclick=function(e){
+  e.preventDefault(); $('priv').classList.toggle('hide');
+};
 
 $('recMic').onclick=function(){ recStartMode('mic'); };
 $('recTab').onclick=function(){ recStartMode('tab'); };
