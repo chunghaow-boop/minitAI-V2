@@ -412,6 +412,58 @@ threading.Thread(target=_worker, daemon=True).start()
 # =========================================================================
 # Quota + retention
 # =========================================================================
+# The server runs on UTC, so "today" ended at midnight UTC - which is 8am in
+# Malaysia. Someone recording at 11pm was told to wait until tomorrow and then
+# waited nine hours, not one. The day now turns over at local midnight.
+TZ_OFFSET_HOURS = float(os.environ.get("MINITAI_TZ_OFFSET", "8"))
+
+
+def _quota_day():
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() + TZ_OFFSET_HOURS * 3600))
+
+
+def _quota_reset_at():
+    """Epoch second of the next local midnight, so the page can count down."""
+    shifted = time.time() + TZ_OFFSET_HOURS * 3600
+    midnight = (int(shifted) // 86400 + 1) * 86400
+    return midnight - TZ_OFFSET_HOURS * 3600
+
+
+def _profile_path(uid):
+    return os.path.join(user_dir(uid), "profile.json")
+
+
+def _save_profile(uid, name):
+    """Remember who is using a code.
+
+    Written to a disk that is wiped whenever the instance sleeps - so the
+    browser re-sends the name on every sign-in and the record heals itself as
+    people come back. Nothing here is authoritative; it is a courtesy so the
+    help assistant can use someone's name and Gavril can see which codes are
+    in use.
+    """
+    name = re.sub(r"\s+", " ", (name or "")).strip()[:60]
+    if not name:
+        return
+    try:
+        old = {}
+        if os.path.exists(_profile_path(uid)):
+            old = json.load(open(_profile_path(uid)))
+        json.dump({"name": name,
+                   "first_seen": old.get("first_seen") or time.time(),
+                   "last_seen": time.time()},
+                  open(_profile_path(uid), "w"))
+    except Exception as e:
+        logging.warning(f"could not save a profile: {type(e).__name__}")
+
+
+def _load_profile(uid):
+    try:
+        return json.load(open(_profile_path(uid)))
+    except Exception:
+        return {}
+
+
 def _quota_path(uid):
     return os.path.join(user_dir(uid), "quota.json")
 
@@ -426,7 +478,7 @@ _SERVICE_QUOTA = os.path.join(DATA_ROOT, "service_quota.json")
 
 
 def _service_quota_locked(minutes):
-    today = time.strftime("%Y-%m-%d")
+    today = _quota_day()
     try:
         d = json.load(open(_SERVICE_QUOTA))
     except Exception:
@@ -472,7 +524,7 @@ def _refund_quota_locked(uid, minutes):
 
 
 def _check_and_add_quota_locked(uid, minutes):
-    today = time.strftime("%Y-%m-%d")
+    today = _quota_day()
     p = _quota_path(uid)
     try:
         d = json.load(open(p))
@@ -560,6 +612,7 @@ def login():
         time.sleep(1.0)          # slow down guessing
         return jsonify({"error": "That invite code is not valid."}), 401
     session["uid"] = _user_id_for(code)
+    _save_profile(session["uid"], (request.json or {}).get("name"))
     session.permanent = True
     return jsonify({"ok": True})
 
@@ -575,7 +628,7 @@ def me():
     uid = current_user()
     if not uid:
         return jsonify({"signed_in": False})
-    today = time.strftime("%Y-%m-%d")
+    today = _quota_day()
     try:
         q = json.load(open(_quota_path(uid)))
         used = q.get("minutes", 0) if q.get("day") == today else 0
@@ -591,6 +644,8 @@ def me():
                     # sleeps, so it is the last place to keep a Google token.
                     "google_client_id": (os.environ.get("GOOGLE_CLIENT_ID") or "").strip(),
                     "is_admin": _is_admin(uid),
+                    "quota_resets_at": _quota_reset_at(),
+                    "name": _load_profile(uid).get("name", ""),
                     "retention_hours": RETENTION_HOURS})
 
 
@@ -782,7 +837,10 @@ def help_ask():
     q = ((request.get_json(silent=True) or {}).get("q") or "").strip()[:400]
     if not q:
         return jsonify({"answer": "Ask me anything about using MinitAI."})
-    sys_p = ("You answer questions about a tool called MinitAI, using ONLY the "
+    who = _load_profile(current_user()).get("name", "")
+    sys_p = ((f"You are speaking to {who}. Use their name once, naturally, not "
+              f"in every sentence.\n\n" if who else "")
+             + "You answer questions about a tool called MinitAI, using ONLY the "
              "facts below. If the answer is not in them, say exactly: \"I do not "
              "know - please ask Gavril.\" Never guess a limit, a price or a "
              "feature. Two or three sentences. Reply in the language of the "
@@ -841,7 +899,7 @@ def admin_stats():
     if not _is_admin(uid):
         abort(404)                     # never confirm the endpoint exists
     now = time.time()
-    today = time.strftime("%Y-%m-%d")
+    today = _quota_day()
     with _jobs_lock:
         jobs = list(JOBS.values())
     people, minutes = set(), 0
@@ -879,6 +937,17 @@ def admin_stats():
             "done": sum(1 for j in jobs if j.get("state") == "done"),
             "failed": sum(1 for j in jobs if j.get("state") == "error"),
         },
+        "codes": sorted(
+            [{
+                # The label is what Gavril needs to know which code to reissue;
+                # the random half stays masked even here.
+                "label": (c.split("-")[0] if "-" in c else c[:6]),
+                "masked": (c.split("-")[0] + "-****" if "-" in c else c[:3] + "***"),
+                "used": bool(_load_profile(_user_id_for(c))),
+                "name": _load_profile(_user_id_for(c)).get("name", ""),
+                "last_seen": _load_profile(_user_id_for(c)).get("last_seen", 0),
+             } for c in _invite_codes()],
+            key=lambda x: (not x["used"], x["label"])),
         "invite_codes_configured": len(_invite_codes()),
         "speaker_labels": cloud.diarisation_available(),
         "google_drive": bool((os.environ.get("GOOGLE_CLIENT_ID") or "").strip()),
@@ -1064,6 +1133,15 @@ border:1px solid var(--line);border-radius:999px;padding:5px 10px}
 box-shadow:0 0 0 3px rgba(74,110,224,.18)}
 @media (prefers-reduced-motion:reduce){
   #helloBody,#helloEyes,#helloArm,#helloTip,#loginCard,#botBob{animation:none}}
+/* --- the microphone gate --- */
+#micGate{text-align:center;padding:22px 16px;background:var(--card2);
+border:1px solid var(--line);border-radius:14px;margin-bottom:16px;
+animation:rise .35s ease both}
+#micGate h3{font-size:16px;margin:10px 0 6px;color:var(--txt)}
+#micGate p{font-size:13px;color:var(--muted);line-height:1.65;margin:0 auto 14px;
+max-width:38ch}
+#micGate svg{display:block;margin:0 auto}
+#appCard.gated > *:not(#micGate){display:none}
 /* --- how much is left today --- */
 #quotaChip{background:var(--card2);border:1px solid var(--line);border-radius:12px;
 padding:11px 13px;margin-bottom:14px}
@@ -1072,6 +1150,7 @@ font-size:13px;margin-bottom:7px;gap:8px}
 #quotaLeft{color:var(--txt);font-weight:600}
 #quotaOf{color:var(--muted);font-size:12px;white-space:nowrap}
 .qbar{height:6px;background:#171b26;border-radius:6px;overflow:hidden}
+.qreset{font-size:11px;color:var(--muted);margin-top:7px}
 .qbar>i{display:block;height:100%;width:0;background:var(--blue);
 transition:width .5s ease}
 #quotaChip.low .qbar>i{background:#FBBF24}
@@ -1136,7 +1215,7 @@ font-size:13px;padding:8px;font-family:inherit;margin-bottom:6px}
 #editForm h4{font-size:12px;color:var(--muted);margin:16px 0 2px;
 text-transform:uppercase;letter-spacing:.4px}
 </style></head><body><div class="wrap">
-<h1>MinitAI</h1>
+<h1>MinitAI<span id="h1name" style="font-weight:400;color:var(--muted)"></span></h1>
 <div class="sub">Meeting audio in. Professional minutes out.</div>
 
 <div class="card {{ 'hide' if signed_in else '' }}" id="loginCard">
@@ -1167,6 +1246,8 @@ text-transform:uppercase;letter-spacing:.4px}
       <span>Nothing kept afterwards</span>
     </div>
   </div>
+  <label for="who">Your name</label>
+  <input id="who" autocomplete="name" placeholder="e.g. Dr. Hafizah" maxlength="60">
   <label for="code">Invite code</label>
   <input id="code" type="password" autocomplete="one-time-code" placeholder="Enter your invite code">
   <button id="loginBtn">Sign in</button>
@@ -1175,9 +1256,29 @@ text-transform:uppercase;letter-spacing:.4px}
 </div>
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
+  <div id="micGate" class="hide">
+    <svg viewBox="0 0 24 32" width="34" height="44" aria-hidden="true">
+      <rect x="7" y="1" width="10" height="17" rx="5" fill="#EAF0FF"/>
+      <path d="M3 14a9 9 0 0 0 18 0" stroke="#8FB4FF" stroke-width="2.2"
+            fill="none" stroke-linecap="round"/>
+      <line x1="12" y1="23" x2="12" y2="29" stroke="#8FB4FF" stroke-width="2.2"
+            stroke-linecap="round"/>
+    </svg>
+    <h3>Let MinitAI hear the meeting</h3>
+    <p>Your browser will ask for the microphone. Say <b>Allow</b> once and it is
+      remembered. Doing this now means you are not fumbling with permissions
+      when the meeting has already started &mdash; and it is how we make sure you
+      never record an hour of silence.</p>
+    <button type="button" id="micAllow">Allow the microphone</button>
+    <button type="button" class="rec" id="micSkip"
+            style="width:100%;margin-top:8px">I will only upload files</button>
+    <div class="note hide" id="micGateErr"></div>
+  </div>
+
   <div id="quotaChip" class="hide">
     <div class="qtop"><span id="quotaLeft"></span><span id="quotaOf"></span></div>
     <div class="qbar"><i id="quotaFill"></i></div>
+    <div class="qreset" id="quotaReset"></div>
   </div>
   <div id="recBar">
     <button type="button" class="rec big" id="recMic">
@@ -1187,6 +1288,15 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
   <div class="note" id="recNote" style="margin-top:6px"></div>
   <div class="note hide" id="micWarn" style="margin-top:6px"></div>
+
+  <label for="lang" style="margin-top:12px">Language spoken in the meeting</label>
+  <select id="lang">
+    <option value="" selected>Detect automatically</option>
+    <option value="ms">Malay / Manglish</option>
+    <option value="en">English</option>
+    <option value="zh">Mandarin</option>
+    <option value="ta">Tamil</option>
+  </select>
 
   <div id="orRow"><span>or</span></div>
   <div id="drop">Choose a recording &mdash; or drop it here<br>
@@ -1209,14 +1319,7 @@ text-transform:uppercase;letter-spacing:.4px}
   <details id="adv">
   <summary>Meeting details and options</summary>
 
-  <label for="lang">Language spoken in the meeting</label>
-  <select id="lang">
-    <option value="">Detect automatically</option>
-    <option value="ms" selected>Malay / Manglish</option>
-    <option value="en">English</option>
-    <option value="zh">Mandarin</option>
-    <option value="ta">Tamil</option>
-  </select>
+
 
   <label for="style">What kind of document do you want?</label>
   <select id="style">
@@ -1389,7 +1492,7 @@ $('loginBtn').onclick=async()=>{
   const code=$('code').value.trim(); if(!code)return;
   $('loginBtn').disabled=true;
   const {ok,j}=await api('/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({code})});
+    body:JSON.stringify({code, name:($('who')||{}).value||''})});
   $('loginBtn').disabled=false;
   if(ok){$('loginMsg').classList.add('hide');$('loginMsg').textContent='';
     $('loginCard').classList.add('hide');$('appCard').classList.remove('hide');loadMe();resume();}
@@ -1690,15 +1793,33 @@ async function micCheck(){
   var st=await micState();
   if(st==='denied'){ micBlocked(); return; }
   if(st==='granted'){ $('micWarn').classList.add('hide'); return; }
-  // Not decided yet: explain before the browser bar appears, so the question
-  // makes sense when it does.
-  $('micWarn').classList.remove('hide');
-  $('micWarn').innerHTML='MinitAI needs your microphone to record. '
-    +'<a href="#" id="micAsk" style="color:var(--blue)">Allow it now</a> '
-    +'so it is ready before your meeting starts.';
-  var link=document.getElementById('micAsk');
-  if(link) link.onclick=function(e){ e.preventDefault(); askMic(); };
+  // Not decided yet: ask now, in front of everything, rather than letting the
+  // browser spring the question mid-meeting.
+  var skipped=false;
+  try{ skipped = localStorage.getItem('minitai.micSkip')==='1'; }catch(e){}
+  if(skipped) return;
+  $('micGate').classList.remove('hide');
+  $('appCard').classList.add('gated');
 }
+
+function closeGate(){
+  $('micGate').classList.add('hide');
+  $('appCard').classList.remove('gated');
+}
+
+$('micAllow').onclick=async function(){
+  $('micAllow').disabled=true; $('micAllow').textContent='Waiting for your answer\u2026';
+  var ok=await askMic();
+  $('micAllow').disabled=false; $('micAllow').textContent='Allow the microphone';
+  if(ok){ closeGate(); return; }
+  $('micGateErr').classList.remove('hide');
+  $('micGateErr').innerHTML='Blocked. Click the padlock in the address bar, set '
+    +'Microphone to Allow, then reload. You can still upload files without it.';
+};
+$('micSkip').onclick=function(){
+  try{ localStorage.setItem('minitai.micSkip','1'); }catch(e){}
+  closeGate();
+};
 
 // --------------------------------------------------------------- history
 // Meetings are remembered in this browser because the server cannot keep them:
@@ -1779,7 +1900,31 @@ $('fbLink').onclick=function(e){
 
 try{ histRender(); }catch(e){}
 try{ micCheck(); }catch(e){}
+// The server's disk is wiped when it sleeps, so the browser re-asserts the
+// name on every sign-in and the record repairs itself.
+try{
+  var _n=localStorage.getItem('minitai.name');
+  if(_n && $('who')) $('who').value=_n;
+  if($('who')) $('who').addEventListener('blur',function(){
+    try{ localStorage.setItem('minitai.name',$('who').value); }catch(e){}
+  });
+}catch(e){}
 try{ setTimeout(driveReconnect, 1200); }catch(e){}
+
+// "Try again tomorrow" is useless without knowing when tomorrow starts.
+var quotaResetAt=0;
+function tickReset(){
+  if(!quotaResetAt){ $('quotaReset').textContent=''; return; }
+  var secs=Math.max(0, quotaResetAt - Date.now()/1000);
+  if(secs<=0){ $('quotaReset').textContent='Refreshing\u2026'; loadMe(); return; }
+  var h=Math.floor(secs/3600), m=Math.floor((secs%3600)/60);
+  var when=new Date(quotaResetAt*1000)
+    .toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  $('quotaReset').textContent='Resets in '
+    + (h ? h+' h ' + m + ' min' : m + ' min')
+    + ' \u2014 at ' + when + ' your time.';
+}
+setInterval(tickReset, 30000);
 
 $('adminBtn').onclick=async function(){
   var o=$('adminOut'); o.classList.remove('hide'); o.textContent='Loading\u2026';
@@ -1795,6 +1940,14 @@ $('adminBtn').onclick=async function(){
       +t.service_daily_cap+' min &middot; cap per person '+t.per_person_cap+' min</div>'
       +'<div class="n">Jobs: '+jb.running+' running, '+jb.done+' done, '
       +jb.failed+' failed</div></div>'
+      +'<div class="row"><b>Invite codes</b>'
+      + (j.codes||[]).map(function(c){
+          return '<div class="n">' + (c.used ? '\u25CF ' : '\u25CB ')
+            + esc(c.masked) + ' \u2014 '
+            + (c.used ? esc(c.name || 'used, no name given') : 'never used')
+            + '</div>';
+        }).join('')
+      +'</div>'
       +'<div class="row"><b>Switches</b><div class="n">'
       +'Speaker labels ' + (j.speaker_labels?'on':'off')
       +' &middot; Google Drive ' + (j.google_drive?'on':'off')
@@ -2300,11 +2453,14 @@ async function loadMe(){const {j}=await api('/me');
     $('quotaFill').style.width = (cap? Math.min(100, used*100/cap) : 0)+'%';
     if(left<=0) chip.classList.add('out');
     else if(left<=Math.max(10, cap*0.15)) chip.classList.add('low');
+    quotaResetAt = j.quota_resets_at || 0;
+    tickReset();
   }
   // Only offered when a key is actually configured, so nobody ticks a box
   // that silently does nothing.
   if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);
   window.MINITAI_GOOGLE = j.google_client_id || '';
+  if(j.name && $('h1name')) $('h1name').textContent = ', ' + j.name;
   if($('adminWrap')) $('adminWrap').classList.toggle('hide', !j.is_admin);
   try{ $('driveAuto').checked = localStorage.getItem('minitai.driveAuto')==='1'; }catch(e){}}
 

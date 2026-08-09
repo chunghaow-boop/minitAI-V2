@@ -238,6 +238,15 @@ check("Page is honest about where documents live",
       and "that copy goes when the server sleeps" in _flat_page)
 check("The full privacy text is one tap away, not hidden",
       'id="privLink"' in page and 'id="priv"' in page)
+check("The page says when the allowance comes back",
+      'id="quotaReset"' in page and "Resets in " in page)
+check("The day turns over at local midnight, not UTC",
+      "_quota_day()" in open("app.py").read()
+      and "TZ_OFFSET_HOURS" in open("app.py").read())
+check("Sign-in asks who you are", 'id="who"' in page)
+check("Admin can see which codes are used and by whom",
+      '"codes"' in open("app.py").read() and '"masked"' in open("app.py").read())
+
 check("Remaining quota is at the top, not buried at the bottom",
       'id="quotaChip"' in page and "min of recording left today" in page)
 check("A failed meeting refunds the minutes",
@@ -247,7 +256,12 @@ check("A silent recording says so instead of \"something went wrong\"",
       "That recording has no sound in it" in open("app.py").read())
 
 check("Microphone is requested before the meeting, not during",
-      "async function micCheck" in page and "Allow it now" in page)
+      "async function micCheck" in page and 'id="micGate"' in page
+      and "Allow the microphone" in page)
+check("The gate hides the app until the question is answered",
+      "#appCard.gated > *:not(#micGate){display:none}" in page)
+check("Someone who only uploads files can get past it",
+      'id="micSkip"' in page and "I will only upload files" in page)
 check("A blocked microphone is explained, not silently ignored",
       "The microphone is blocked for this site" in page)
 check("Page points confidential users to the desktop version",
