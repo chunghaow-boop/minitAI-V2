@@ -481,7 +481,7 @@ def _find_missing(transcript_text, draft, data_dir, schema):
 
 def analyze(transcript_text, data_dir, system_prompt, schema,
             style=DEFAULT_STYLE, completeness_check=True, focus="", roster="",
-            previous=""):
+            previous="", lang=""):
     """Summarise a transcript.
 
     Long transcripts are summarised in sections and merged, then checked once
@@ -490,6 +490,13 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
     """
     style_rule = SUMMARY_STYLES.get(style, SUMMARY_STYLES[DEFAULT_STYLE])
     sys_p = system_prompt + "\n\nSTYLE FOR THIS DOCUMENT:\n" + style_rule
+    # The dropdown used to steer only the transcriber. The summariser never
+    # learned what language to write in, so an English meeting could come back
+    # as Malay minutes because the installed default said so.
+    import watch_and_run as _eng
+    _rule = _eng._LANG_RULES.get((lang or "").lower())
+    if _rule:
+        sys_p = _rule + "\n\n" + sys_p
     focus = (focus or "").strip()
     if focus:
         # The user's own words. Placed last so it outranks the style, but framed
@@ -577,6 +584,8 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
     # answer only if it is strictly a folding of what we already had.
     if names:
         data["attendees"] = names
+    if (lang or "").lower() in ("en", "ms", "zh"):
+        data["output_language"] = lang.lower()   # the document furniture too
     if len(data.get("agenda_items") or []) > CONSOLIDATE_OVER_ITEMS:
         try:
             data = _consolidate(data, data_dir)

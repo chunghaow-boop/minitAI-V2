@@ -287,6 +287,50 @@ check("Every outbound URL is one we chose deliberately",
 check("Google's script is loaded on demand, not on page load",
       "GIS_SRC" in page and "createElement('script')" in page
       and 'src="https://accounts.google.com' not in page)
+# The admin view is one of the invite codes, not a second username and
+# password on a public URL. admin/admin is the first pair every scanner tries.
+os.environ["MINITAI_ADMIN_CODE"] = "alpha-code-111"
+_boss, _mate = client(), client()
+signin(_boss, "alpha-code-111"); signin(_mate, "beta-code-222")
+# The dropdown used to steer only the transcriber, so an English meeting could
+# come back as Malay minutes because the installed default said so.
+_seen = {}
+_real_one_pass = A.cloud._one_pass
+def _spy(t, dd, sp, sch):
+    _seen["sys"] = sp
+    return {"meeting_title": "M", "agenda_items": [{"topic": "T", "discussion": "d",
+            "decision": "x"}], "action_items": [], "attendees": [], "key_points": [],
+            "key_takeaways": [], "important_notes": [], "activities": [],
+            "date": "", "time": "", "location": ""}
+A.cloud._one_pass = _spy
+_en = A.cloud.analyze("We discussed the budget.", "/tmp", "SYS", {},
+                      lang="en", completeness_check=False)
+check("Choosing English tells the summariser, not just the transcriber",
+      _seen["sys"].startswith("Write all output in English."))
+check("The document furniture follows the choice too",
+      A.engine.doc_labels(_en)["matters"] == "Matters Discussed")
+_ms = A.cloud.analyze("Kami bincang bajet.", "/tmp", "SYS", {},
+                      lang="ms", completeness_check=False)
+check("Malay still produces Malay headings",
+      A.engine.doc_labels(_ms)["matters"] == "Perkara Dibincangkan")
+_au = A.cloud.analyze("We discussed the budget.", "/tmp", "SYS", {},
+                      lang="", completeness_check=False)
+check("Automatic still detects from the content",
+      A.engine.doc_labels(_au)["matters"] == "Matters Discussed")
+A.cloud._one_pass = _real_one_pass
+
+check("Admin can see the usage view", _boss.get("/admin").status_code == 200)
+check("An ordinary user gets 404, not 403 - the endpoint is not even confirmed",
+      _mate.get("/admin").status_code == 404)
+check("Anonymous cannot reach the admin view", client().get("/admin").status_code == 401)
+check("Admin view carries no meeting content",
+      "docx" not in _boss.get("/admin").get_data(as_text=True).lower())
+check("Admin counters say plainly that they reset",
+      "wiped whenever the free instance sleeps" in _boss.get("/admin").get_data(as_text=True))
+os.environ.pop("MINITAI_ADMIN_CODE", None)
+check("With no admin code configured, nobody is admin",
+      client().get("/admin").status_code in (401, 404))
+
 check("Drive history is offered without a pop-up on every visit",
       "driveReconnect" in page and "prompt:''" in page
       and "minitai.driveLinked" in page)

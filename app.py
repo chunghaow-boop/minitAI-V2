@@ -95,6 +95,9 @@ app.config.update(
     SESSION_COOKIE_SECURE=os.environ.get("MINITAI_INSECURE_COOKIES") != "1",
 )
 
+# Every counter below is only meaningful relative to this.
+_STARTED_AT = time.time()
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -364,7 +367,8 @@ def _run_job(job_id):
                              style=job.get("style") or cloud.DEFAULT_STYLE,
                              focus=job.get("focus") or "",
                              roster=job.get("roster") or "",
-                             previous=job.get("previous") or "")
+                             previous=job.get("previous") or "",
+                             lang=job.get("lang") or "")
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
         data = engine._drop_hallucinations(
@@ -586,6 +590,7 @@ def me():
                     # point: the disk here is wiped whenever the free instance
                     # sleeps, so it is the last place to keep a Google token.
                     "google_client_id": (os.environ.get("GOOGLE_CLIENT_ID") or "").strip(),
+                    "is_admin": _is_admin(uid),
                     "retention_hours": RETENTION_HOURS})
 
 
@@ -813,6 +818,72 @@ def ask_meeting():
     except Exception as e:
         logging.warning(f"ask failed: {type(e).__name__}")
         return jsonify({"error": "Could not answer that just now."}), 503
+
+
+def _is_admin(uid):
+    """Admin is one of the invite codes, not a separate login.
+
+    A second username and password on a public URL is a second thing that can
+    be guessed, and the obvious choice - admin/admin - is the first pair every
+    automated scanner on the internet tries. The invite codes are already long
+    random strings that only Gavril hands out, so nominating one costs nothing
+    and adds no new way in.
+    """
+    code = (os.environ.get("MINITAI_ADMIN_CODE") or "").strip()
+    return bool(code) and uid == _user_id_for(code)
+
+
+@app.route("/admin")
+def admin_stats():
+    """What is actually happening in MinitAI. Counts only - never anyone's
+    meeting content, titles or file names."""
+    uid = require_user()
+    if not _is_admin(uid):
+        abort(404)                     # never confirm the endpoint exists
+    now = time.time()
+    today = time.strftime("%Y-%m-%d")
+    with _jobs_lock:
+        jobs = list(JOBS.values())
+    people, minutes = set(), 0
+    for d in os.listdir(DATA_ROOT) if os.path.isdir(DATA_ROOT) else []:
+        if not d.startswith("u_"):
+            continue
+        try:
+            q = json.load(open(os.path.join(DATA_ROOT, d, "quota.json")))
+            if q.get("day") == today and q.get("minutes"):
+                people.add(d)
+                minutes += int(q["minutes"])
+        except Exception:
+            pass
+    try:
+        svc = json.load(open(_SERVICE_QUOTA))
+        svc_min = int(svc.get("minutes", 0)) if svc.get("day") == today else 0
+    except Exception:
+        svc_min = 0
+    return jsonify({
+        "counted_since": _STARTED_AT,
+        "counted_for_seconds": int(now - _STARTED_AT),
+        "warning": ("These counters live on a disk that is wiped whenever the "
+                    "free instance sleeps. They show usage since the last "
+                    "restart, not the true daily total. Groq's own console is "
+                    "the only authoritative figure."),
+        "today": {
+            "people_who_used_it": len(people),
+            "minutes_charged_to_people": minutes,
+            "service_minutes_counted": svc_min,
+            "service_daily_cap": SERVICE_DAILY_MINUTES,
+            "per_person_cap": MAX_MINUTES_PER_USER_PER_DAY,
+        },
+        "jobs_in_memory": {
+            "running": sum(1 for j in jobs if j.get("state") not in ("done", "error")),
+            "done": sum(1 for j in jobs if j.get("state") == "done"),
+            "failed": sum(1 for j in jobs if j.get("state") == "error"),
+        },
+        "invite_codes_configured": len(_invite_codes()),
+        "speaker_labels": cloud.diarisation_available(),
+        "google_drive": bool((os.environ.get("GOOGLE_CLIENT_ID") or "").strip()),
+        "retention_hours": RETENTION_HOURS,
+    })
 
 
 @app.route("/wipe", methods=["POST"])
@@ -1055,6 +1126,9 @@ margin-bottom:8px}
 #editForm .row{background:var(--card2);border:1px solid var(--line);
 border-radius:10px;padding:10px;margin-top:8px}
 #editForm .row .n{font-size:11px;color:var(--muted);margin-bottom:4px}
+#adminOut .row{background:var(--card2);border:1px solid var(--line);
+border-radius:10px;padding:10px;margin-top:8px;font-size:13px}
+#adminOut .n{font-size:12px;color:var(--muted);margin-top:4px}
 #editForm input,#editForm textarea{width:100%;background:var(--card);
 border:1px solid var(--line);border-radius:8px;color:var(--txt);
 font-size:13px;padding:8px;font-family:inherit;margin-bottom:6px}
@@ -1234,6 +1308,13 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
 
   <div class="note hide" id="quota"></div>
+
+  <div id="adminWrap" class="hide">
+    <label style="margin-top:18px">Admin</label>
+    <button type="button" class="rec" id="adminBtn"
+            style="width:100%">Show usage across everyone</button>
+    <div id="adminOut" class="hide"></div>
+  </div>
 
   <div id="histWrap" class="hide">
     <label style="margin-top:18px">Your past meetings</label>
@@ -1699,6 +1780,29 @@ $('fbLink').onclick=function(e){
 try{ histRender(); }catch(e){}
 try{ micCheck(); }catch(e){}
 try{ setTimeout(driveReconnect, 1200); }catch(e){}
+
+$('adminBtn').onclick=async function(){
+  var o=$('adminOut'); o.classList.remove('hide'); o.textContent='Loading\u2026';
+  try{
+    var j=await fetch('/admin').then(function(r){ return r.json(); });
+    var t=j.today||{}, jb=j.jobs_in_memory||{};
+    var mins=Math.floor((j.counted_for_seconds||0)/60);
+    o.innerHTML=
+      '<div class="row"><b>Today, since the last restart</b>'
+      +'<div class="n">'+t.people_who_used_it+' of '+j.invite_codes_configured
+      +' people &middot; '+t.minutes_charged_to_people+' min charged</div>'
+      +'<div class="n">Service total '+t.service_minutes_counted+' / '
+      +t.service_daily_cap+' min &middot; cap per person '+t.per_person_cap+' min</div>'
+      +'<div class="n">Jobs: '+jb.running+' running, '+jb.done+' done, '
+      +jb.failed+' failed</div></div>'
+      +'<div class="row"><b>Switches</b><div class="n">'
+      +'Speaker labels ' + (j.speaker_labels?'on':'off')
+      +' &middot; Google Drive ' + (j.google_drive?'on':'off')
+      +' &middot; retention ' + j.retention_hours + 'h</div></div>'
+      +'<div class="note" style="color:#FBBF24">Counting for '+mins+' min. '
+      + j.warning + '</div>';
+  }catch(e){ o.textContent='Could not load the admin view.'; }
+};
 
 $('privLink').onclick=function(e){
   e.preventDefault(); $('priv').classList.toggle('hide');
@@ -2201,6 +2305,7 @@ async function loadMe(){const {j}=await api('/me');
   // that silently does nothing.
   if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);
   window.MINITAI_GOOGLE = j.google_client_id || '';
+  if($('adminWrap')) $('adminWrap').classList.toggle('hide', !j.is_admin);
   try{ $('driveAuto').checked = localStorage.getItem('minitai.driveAuto')==='1'; }catch(e){}}
 
 async function loadRecent(){

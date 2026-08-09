@@ -1278,6 +1278,12 @@ _MS_HINTS = ("mesyuarat", "pelajar", "yang", "dan", "untuk", "kepada", "tidak",
 
 def doc_labels(data=None):
     """Which language the document furniture should be written in."""
+    # An explicit choice by the user beats both the installed default and any
+    # guess from the content. Recording an English meeting and getting Malay
+    # minutes is the bug this closes.
+    chosen = str((data or {}).get("output_language") or "").lower()
+    if chosen in _DOC_LABELS:
+        return _DOC_LABELS[chosen]
     lang = (OUTPUT_LANG or "auto").lower()
     if lang in _DOC_LABELS:
         return _DOC_LABELS[lang]
