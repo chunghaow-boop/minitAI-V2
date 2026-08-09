@@ -1116,7 +1116,119 @@ def doc_labels(data=None):
     return _DOC_LABELS["en"]
 
 
+def _as_dict(v, default=None):
+    return v if isinstance(v, dict) else (default if default is not None else {})
+
+
+def _as_list(v):
+    if isinstance(v, list):
+        return v
+    if v in (None, "", {}):
+        return []
+    return [v]
+
+
+def _as_text(v):
+    """Flatten whatever a model produced into a plain string."""
+    if isinstance(v, str):
+        return v
+    if v is None or isinstance(v, (dict, list)) and not v:
+        return ""
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return " ".join(_as_text(x) for x in v if x)
+    if isinstance(v, dict):
+        return " ".join(_as_text(x) for x in v.values() if x)
+    return str(v)
+
+
+def normalise_analysis(data):
+    """Force a model's output into the exact shape the document generators
+    expect, whatever it actually produced.
+
+    Grammar-constrained JSON guarantees the shape, but not every model or
+    provider supports it - Groq's llama-3.3-70b rejects `json_schema` and falls
+    back to free-form JSON. A live meeting died here because `slides` came back
+    as a LIST instead of an object and gen_pptx called .get() on it. Coercing
+    once, here, protects every caller: local, cloud, and the edit-then-generate
+    flow.
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    for f in ("meeting_title", "date", "time", "location"):
+        data[f] = _as_text(data.get(f)).strip()
+
+    data["attendees"] = [_as_text(a).strip() for a in _as_list(data.get("attendees")) if _as_text(a).strip()]
+    for f in ("activities", "key_points", "key_takeaways", "important_notes"):
+        data[f] = [_as_text(x).strip() for x in _as_list(data.get(f)) if _as_text(x).strip()]
+
+    agenda = []
+    for it in _as_list(data.get("agenda_items")):
+        if isinstance(it, dict):
+            agenda.append({"topic": _as_text(it.get("topic")).strip(),
+                           "discussion": _as_text(it.get("discussion")).strip(),
+                           "decision": _as_text(it.get("decision")).strip()})
+        elif _as_text(it).strip():
+            agenda.append({"topic": _as_text(it).strip(), "discussion": "", "decision": ""})
+    data["agenda_items"] = agenda
+
+    actions = []
+    for it in _as_list(data.get("action_items")):
+        if isinstance(it, dict):
+            actions.append({"task": _as_text(it.get("task")).strip(),
+                            "owner": _as_text(it.get("owner")).strip(),
+                            "deadline": _as_text(it.get("deadline")).strip()})
+        elif _as_text(it).strip():
+            actions.append({"task": _as_text(it).strip(), "owner": "", "deadline": ""})
+    data["action_items"] = actions
+
+    theme = _as_dict(data.get("theme"))
+    data["theme"] = {
+        "primary_hex": (_as_text(theme.get("primary_hex")).strip().lstrip("#") or "1E2761")[:6],
+        "accent_hex": (_as_text(theme.get("accent_hex")).strip().lstrip("#") or "FFD500")[:6],
+        "mood": _as_text(theme.get("mood")).strip(),
+    }
+
+    # slides: the field that actually broke a live meeting.
+    slides = data.get("slides")
+    if isinstance(slides, list):
+        # A bare list of slides, or [{title_slide:..}, {content_slides:..}].
+        merged = {}
+        loose = []
+        for entry in slides:
+            if isinstance(entry, dict) and ("title_slide" in entry or "content_slides" in entry):
+                merged.update(entry)
+            else:
+                loose.append(entry)
+        if loose and "content_slides" not in merged:
+            merged["content_slides"] = loose
+        slides = merged
+    slides = _as_dict(slides)
+
+    title_slide = _as_dict(slides.get("title_slide"))
+    content = []
+    for sl in _as_list(slides.get("content_slides")):
+        if isinstance(sl, dict):
+            content.append({"heading": _as_text(sl.get("heading")).strip(),
+                            "bullets": [_as_text(b).strip()
+                                        for b in _as_list(sl.get("bullets"))
+                                        if _as_text(b).strip()]})
+        elif _as_text(sl).strip():
+            content.append({"heading": _as_text(sl).strip(), "bullets": []})
+    data["slides"] = {
+        "title_slide": {"title": _as_text(title_slide.get("title")).strip()
+                                 or data["meeting_title"] or "Meeting Minutes",
+                        "subtitle": _as_text(title_slide.get("subtitle")).strip()
+                                    or data.get("date", "")},
+        "content_slides": content,
+    }
+    return data
+
+
 def gen_docx(data, path):
+    data = normalise_analysis(data)
     from docx.shared import Pt, RGBColor as _RGB
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
@@ -1258,6 +1370,7 @@ def gen_docx(data, path):
 
 
 def gen_pptx(data, path):
+    data = normalise_analysis(data)
     theme = data.get("theme", {})
     primary = hex_to_rgb(theme.get("primary_hex", "1E2761"), NAVY)
     accent = hex_to_rgb(theme.get("accent_hex", "FFD500"), WHITE)
