@@ -238,6 +238,22 @@ check("Page points confidential users to the desktop version",
 # when someone chooses to send the minutes on. wa.me is the one allowed.
 import re as _re
 _tags = _re.findall(r'<(?:script|link|img|iframe|source|video|audio)\b[^>]*>', page, _re.I)
+# The page template is a normal Python string, so a "\n" written in the source
+# becomes a REAL newline in the JavaScript and silently breaks the whole script
+# - the login button simply stops working. Parse it and find out.
+import shutil as _sh, subprocess as _sp, tempfile as _tf
+_js = _re.search(r"<script>(.*?)</script>", page, _re.S)
+check("Page contains its script", bool(_js))
+if _js and _sh.which("node"):
+    with _tf.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as _f:
+        _f.write(_js.group(1)); _jsp = _f.name
+    _r = _sp.run(["node", "--check", _jsp], capture_output=True, text=True)
+    check("Page JavaScript parses", _r.returncode == 0)
+    if _r.returncode:
+        print((_r.stderr or "")[:400])
+else:
+    print("NOTE node not available - JavaScript not parsed")
+
 check("Page fetches nothing from the internet",
       not any(_re.search(r'https?://', t) for t in _tags))
 _ext = set(_re.findall(r'https?://[^\s"\'<>()]+', page))

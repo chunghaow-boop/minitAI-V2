@@ -232,6 +232,56 @@ def _to_flac(src, dst, ffmpeg_exe, start=None, length=None):
     return os.path.exists(dst) and os.path.getsize(dst) > 1024
 
 
+# --- optional: speaker labels via AssemblyAI ------------------------------
+# Groq has no speaker support at all. AssemblyAI does, it handles Malay, and
+# diarisation costs about two cents an hour. Entirely optional: with no key
+# set, nothing below ever runs and Groq stays the only service touched.
+AAI_KEY_ENV = "ASSEMBLYAI_API_KEY"
+AAI_ROOT = "https://api.assemblyai.com/v2"
+
+
+def diarisation_available():
+    return bool((os.environ.get(AAI_KEY_ENV) or "").strip())
+
+
+def transcribe_with_speakers(audio_path, language=None, speakers=None):
+    """Transcript as "Speaker A: ..." lines. Raises if anything goes wrong, so
+    the caller can fall back to Groq and the meeting is never lost."""
+    key = (os.environ.get(AAI_KEY_ENV) or "").strip()
+    if not key:
+        raise RuntimeError("No AssemblyAI key configured.")
+    head = {"authorization": key}
+    with open(audio_path, "rb") as fh:
+        up = requests.post(AAI_ROOT + "/upload", headers=head, data=fh, timeout=600)
+    if up.status_code != 200:
+        raise RuntimeError(f"AssemblyAI rejected the upload ({up.status_code}).")
+    body = {"audio_url": up.json()["upload_url"], "speaker_labels": True}
+    if language:
+        body["language_code"] = language
+    if speakers:
+        body["speakers_expected"] = int(speakers)
+    job = requests.post(AAI_ROOT + "/transcript", headers=head, json=body, timeout=60)
+    if job.status_code not in (200, 201):
+        raise RuntimeError(f"AssemblyAI refused the job ({job.status_code}).")
+    tid = job.json()["id"]
+    deadline = time.time() + 3600
+    while time.time() < deadline:
+        time.sleep(5)
+        r = requests.get(f"{AAI_ROOT}/transcript/{tid}", headers=head, timeout=60)
+        j = r.json()
+        if j.get("status") == "completed":
+            lines = []
+            for u in (j.get("utterances") or []):
+                who = u.get("speaker") or "?"
+                said = (u.get("text") or "").strip()
+                if said:
+                    lines.append(f"Speaker {who}: {said}")
+            return "\n".join(lines) or (j.get("text") or "")
+        if j.get("status") == "error":
+            raise RuntimeError(j.get("error") or "AssemblyAI failed.")
+    raise RuntimeError("AssemblyAI took too long.")
+
+
 def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
                prompt=None, duration=None, progress=None, segments_out=None):
     """Transcribe via Groq. Raises on failure so the caller can fall back."""
@@ -430,7 +480,8 @@ def _find_missing(transcript_text, draft, data_dir, schema):
 
 
 def analyze(transcript_text, data_dir, system_prompt, schema,
-            style=DEFAULT_STYLE, completeness_check=True, focus="", roster=""):
+            style=DEFAULT_STYLE, completeness_check=True, focus="", roster="",
+            previous=""):
     """Summarise a transcript.
 
     Long transcripts are summarised in sections and merged, then checked once
@@ -461,6 +512,19 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
                     "they appear. Put exactly these names in attendees - do not "
                     "add anyone who was merely mentioned, and do not drop anyone "
                     "on this list.")
+
+    prev = (previous or "").strip()
+    if prev:
+        # Malaysian minutes open with what was carried over. Nobody wants to
+        # retype it every month when last month's file already says it.
+        sys_p += ("\n\nLAST MEETING'S MINUTES (for matters arising only):\n"
+                  + prev[:12000]
+                  + "\n\nBEFORE the new agenda items, add agenda_items whose topic "
+                    "begins \"Perkara Berbangkit: \" for each matter from those "
+                    "minutes that THIS meeting actually returned to - what has "
+                    "happened since, and where it now stands. Only matters this "
+                    "recording genuinely discussed. Never carry an item over just "
+                    "because it appears in the old minutes.")
 
     text = transcript_text or ""
     if len(text) <= MAP_REDUCE_OVER_CHARS:
@@ -522,6 +586,20 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
 
 
 CONSOLIDATE_OVER_ITEMS = int(os.environ.get("MINITAI_CONSOLIDATE_OVER", "10"))
+
+
+def ask_text(system_prompt, question, data_dir):
+    """One plain-text answer. Used by the help assistant and by questions about
+    a past meeting - both want prose, not the minutes JSON."""
+    key = get_key(data_dir)
+    if not key:
+        raise RuntimeError("No Groq key configured.")
+    body = {"model": pick_chat_model(data_dir), "temperature": 0.2,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": question}]}
+    r = _post_with_retry(API_ROOT + "/chat/completions", key,
+                         json_body=body, timeout=120)
+    return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
 def _consolidate(data, data_dir):

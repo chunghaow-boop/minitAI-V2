@@ -223,6 +223,32 @@ def _worker():
                 pass
 
 
+def _previous_text(f):
+    """Text of last meeting's minutes, if the user attached them.
+
+    Read here and thrown away immediately: it only ever exists to give the
+    summariser something to write Perkara Berbangkit from.
+    """
+    if not f or not f.filename:
+        return ""
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in DOC_EXTS:
+        return ""
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"prev_{secrets.token_hex(6)}{ext}")
+    try:
+        f.save(tmp)
+        return (engine.extract_text_from_file(tmp) or "")[:20000]
+    except Exception as e:
+        logging.warning(f"previous minutes unreadable: {type(e).__name__}")
+        return ""
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def _seed(job):
     """What the transcriber is told to expect: the hint words and the roster.
 
@@ -277,17 +303,30 @@ def _run_job(job_id):
             def prog(i, n):
                 _set(job_id, progress=int(i * 90 / max(1, n)))
 
-            text = cloud.transcribe(audio_path, DATA_ROOT, engine._ffmpeg_exe(),
-                                    language=job.get("lang") or None,
-                                    prompt=_seed(job) or None,
-                                    duration=dur, progress=prog,
-                                    segments_out=segments)
+            text = None
+            if job.get("speakers") and cloud.diarisation_available():
+                try:
+                    _set(job_id, state="transcribing", progress=5)
+                    text = cloud.transcribe_with_speakers(
+                        audio_path, language=job.get("lang") or None)
+                    logging.info("job: speaker labels via AssemblyAI")
+                except Exception as e:
+                    # Never lose a meeting to an optional extra.
+                    logging.warning(f"diarisation failed, falling back: {type(e).__name__}")
+                    text = None
+            if text is None:
+                text = cloud.transcribe(audio_path, DATA_ROOT, engine._ffmpeg_exe(),
+                                        language=job.get("lang") or None,
+                                        prompt=_seed(job) or None,
+                                        duration=dur, progress=prog,
+                                        segments_out=segments)
         _set(job_id, state="summarising", progress=92)
         data = cloud.analyze(text, DATA_ROOT, engine.SYSTEM_PROMPT,
                              engine.ANALYSIS_SCHEMA,
                              style=job.get("style") or cloud.DEFAULT_STYLE,
                              focus=job.get("focus") or "",
-                             roster=job.get("roster") or "")
+                             roster=job.get("roster") or "",
+                             previous=job.get("previous") or "")
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
         data = engine._drop_hallucinations(data, text)
@@ -499,6 +538,7 @@ def me():
         used = 0
     return jsonify({"signed_in": True, "used_minutes": used,
                     "daily_limit": MAX_MINUTES_PER_USER_PER_DAY,
+                    "speakers_available": cloud.diarisation_available(),
                     "retention_hours": RETENTION_HOURS})
 
 
@@ -571,6 +611,8 @@ def upload():
          focus=(request.form.get("focus") or "").strip()[:600],
          hints=(request.form.get("hints") or "").strip()[:400],
          roster=(request.form.get("roster") or "").strip()[:1200],
+         speakers=(request.form.get("speakers") == "1"),
+         previous=_previous_text(request.files.get("prev")),
          created=time.time())
     _work.put(job_id)
     mins = int(dur / 60)
@@ -639,6 +681,89 @@ def regenerate():
         return jsonify({"error": f"Could not rebuild the documents: {e}"}), 500
     return jsonify({"files": _package(uid, (("docx", docx), ("pptx", pptx))),
                     "title": data.get("meeting_title", "")})
+
+
+MINITAI_FACTS = """
+MinitAI turns a meeting recording into formal minutes (Word), a slide summary
+and a full transcript. It is run by Gavril for about twenty friends, family and
+colleagues. These are ALL the facts you have:
+
+- Sign in with the personal invite code Gavril gave you. One code per person;
+  your meetings are separate from everyone else's. Codes are not shared.
+- Upload a recording (mp3, mp4, m4a, wav, mov, mkv, webm, phone voice memos) or
+  press "Record the room" to record with the microphone. "Record an online
+  meeting" captures a Meet or Zoom tab and only works on a laptop - no phone
+  browser can capture a call.
+- You can also upload a document (pdf, docx, pptx, txt) to summarise instead.
+- First load of the day takes about a minute: the free server sleeps after 15
+  minutes of no use and has to wake up. It is not broken.
+- One meeting is processed at a time. Others queue and the page says how many
+  are ahead.
+- Recordings longer than about two hours are refused. Split them in half.
+- There is a daily limit per person, shown at the bottom of the page. It counts
+  the LENGTH of the recording, not how long you spend using the app.
+- Files are handed to your browser. A copy sits on the server only until it
+  sleeps, which can be within the hour. Save them when you get them.
+- "Fix something before you save" lets you correct a name or a decision and
+  rebuild the documents. That is free and does not use your allowance.
+- Fill in "Who was there?" and "Names it might not know". It is the single
+  biggest thing that improves spelling of names, because the transcriber is
+  told the names before it starts.
+- Audio is sent to Groq in the United States to be transcribed. That is a
+  transfer outside Malaysia. Do not use it for confidential meetings - the
+  desktop version never uploads anything.
+- "Delete everything of mine on the server" wipes your files immediately.
+"""
+
+
+@app.route("/help", methods=["POST"])
+def help_ask():
+    """Answer questions about MinitAI, strictly from the facts above.
+
+    Deliberately not a general assistant. A model improvising about an app it
+    has never seen invents limits that do not exist, and the person asking
+    believes it.
+    """
+    require_user()
+    q = ((request.get_json(silent=True) or {}).get("q") or "").strip()[:400]
+    if not q:
+        return jsonify({"answer": "Ask me anything about using MinitAI."})
+    sys_p = ("You answer questions about a tool called MinitAI, using ONLY the "
+             "facts below. If the answer is not in them, say exactly: \"I do not "
+             "know - please ask Gavril.\" Never guess a limit, a price or a "
+             "feature. Two or three sentences. Reply in the language of the "
+             "question (Malay or English).\n\n" + MINITAI_FACTS)
+    try:
+        ans = cloud.ask_text(sys_p, q, DATA_ROOT)
+    except Exception as e:
+        logging.warning(f"help failed: {type(e).__name__}")
+        return jsonify({"answer": "The help assistant is unavailable right now. "
+                                  "Ask Gavril."})
+    return jsonify({"answer": ans})
+
+
+@app.route("/ask", methods=["POST"])
+def ask_meeting():
+    """Answer a question about a past meeting, from its transcript.
+
+    The transcript is sent by the browser, which is the only place it reliably
+    still exists - the server clears its disk whenever it sleeps.
+    """
+    require_user()
+    body = request.get_json(silent=True) or {}
+    q = (body.get("q") or "").strip()[:400]
+    text = (body.get("transcript") or "")[:60000]
+    if not q or not text.strip():
+        return jsonify({"error": "Pick a meeting and ask a question."}), 400
+    sys_p = ("Answer the question using ONLY this meeting transcript. If the "
+             "meeting did not cover it, say so plainly rather than guessing. "
+             "Quote what was actually said where it helps. Reply in the "
+             "language of the question.\n\nTRANSCRIPT:\n" + text)
+    try:
+        return jsonify({"answer": cloud.ask_text(sys_p, q, DATA_ROOT)})
+    except Exception as e:
+        logging.warning(f"ask failed: {type(e).__name__}")
+        return jsonify({"error": "Could not answer that just now."}), 503
 
 
 @app.route("/wipe", methods=["POST"])
@@ -859,6 +984,23 @@ text-transform:uppercase;letter-spacing:.4px}
     get them right.</div>
   <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Prof Lim, Bil 1/2026">
 
+  <label for="prev">Last meeting's minutes (optional)</label>
+  <div class="note" style="margin:0 0 6px">Attach them and the summary opens
+    with <b>Perkara Berbangkit</b> &mdash; what was carried over from last time.
+    The file is read once and never kept.</div>
+  <input id="prev" type="file" accept=".pdf,.docx,.txt,.md"
+         style="width:100%;background:var(--card2);border:1px solid var(--line);
+                border-radius:10px;color:var(--muted);font-size:13px;padding:9px">
+
+  <div id="spkWrap" class="hide">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <input type="checkbox" id="speakers" style="width:auto;margin:0">
+      <span>Label who said what</span></label>
+    <div class="note" style="margin:2px 0 0">Uses a second service
+      (AssemblyAI) that can tell voices apart. Slower, and your audio goes
+      there instead of Groq.</div>
+  </div>
+
   <label for="roster">Who was there? (optional)</label>
   <div class="note" style="margin:0 0 6px">One name per line. This fills the
     KEHADIRAN section, tells the transcriber how the names are spelt, and stops
@@ -887,6 +1029,26 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
 
   <div class="note" id="quota"></div>
+
+  <div id="histWrap" class="hide">
+    <label style="margin-top:18px">Your past meetings</label>
+    <div class="note" style="margin:0 0 6px">Kept in this browser only, never on
+      the server. Clearing your browser data clears these.</div>
+    <select id="histPick"></select>
+    <input id="askQ" placeholder="Ask about this meeting, e.g. apa keputusan pasal yuran?"
+           style="margin-top:8px">
+    <button type="button" class="rec" id="askBtn"
+            style="width:100%;margin-top:8px">Ask</button>
+    <div class="note hide" id="askOut"></div>
+  </div>
+
+  <label style="margin-top:18px">Need help?</label>
+  <input id="helpQ" placeholder="e.g. kenapa lambat nak buka? / how do I record a Zoom call?">
+  <button type="button" class="rec" id="helpBtn"
+          style="width:100%;margin-top:8px">Ask about MinitAI</button>
+  <div class="note hide" id="helpOut"></div>
+  <div class="note"><a id="fbLink" href="#" style="color:var(--muted)">Send Gavril
+    feedback about MinitAI</a></div>
   <div id="recentWrap" class="hide">
     <label style="margin-top:18px">Recent documents</label>
     <div class="note" style="margin:0 0 6px">Still here if you closed the page
@@ -1188,6 +1350,70 @@ $('wipeBtn').onclick=async function(){
   $('wipeBtn').textContent='Delete everything of mine on the server';
 };
 
+// --------------------------------------------------------------- history
+// Meetings are remembered in this browser because the server cannot keep them:
+// its disk is wiped whenever the free instance sleeps.
+var HIST_KEY='minitai.history', HIST_MAX=15;
+function histLoad(){ try{ return JSON.parse(localStorage.getItem(HIST_KEY)||'[]'); }catch(e){ return []; } }
+function histSave(list){ try{ localStorage.setItem(HIST_KEY,JSON.stringify(list)); }catch(e){} }
+function histAdd(title, transcript){
+  if(!transcript) return;
+  var list=histLoad();
+  list.unshift({t:title||'Mesyuarat', d:new Date().toISOString().slice(0,16).replace('T',' '),
+                x:String(transcript).slice(0,60000)});
+  while(list.length>HIST_MAX) list.pop();
+  // Storage is finite; drop the oldest until it fits rather than throwing.
+  for(;;){ try{ histSave(list); break; }catch(e){ if(list.length<2) break; list.pop(); } }
+  histRender();
+}
+function histRender(){
+  var list=histLoad(), sel=$('histPick');
+  if(!list.length){ $('histWrap').classList.add('hide'); return; }
+  $('histWrap').classList.remove('hide');
+  sel.innerHTML='';
+  list.forEach(function(m,i){
+    var o=document.createElement('option'); o.value=i; o.textContent=m.d+'  -  '+m.t;
+    sel.appendChild(o);
+  });
+}
+$('askBtn').onclick=async function(){
+  var list=histLoad(), m=list[parseInt($('histPick').value,10)||0];
+  var q=$('askQ').value.trim();
+  if(!m||!q){ return; }
+  $('askOut').classList.remove('hide'); $('askOut').textContent='Thinking\u2026';
+  try{
+    var r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({q:q,transcript:m.x})});
+    var j=await r.json();
+    $('askOut').textContent=j.answer||j.error||'No answer.';
+  }catch(e){ $('askOut').textContent='Could not ask just now.'; }
+};
+
+// ------------------------------------------------------------------ help
+$('helpBtn').onclick=async function(){
+  var q=$('helpQ').value.trim(); if(!q) return;
+  $('helpOut').classList.remove('hide'); $('helpOut').textContent='Thinking\u2026';
+  try{
+    var r=await fetch('/help',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({q:q})});
+    var j=await r.json();
+    $('helpOut').textContent=j.answer||'Ask Gavril.';
+  }catch(e){ $('helpOut').textContent='Help is unavailable right now. Ask Gavril.'; }
+};
+$('helpQ').addEventListener('keydown',function(e){ if(e.key==='Enter')$('helpBtn').click(); });
+
+// Feedback goes straight to Gavril as an email rather than into a box on a
+// server that wipes itself - a comment nobody ever reads is worse than none.
+$('fbLink').onclick=function(e){
+  e.preventDefault();
+  var body=encodeURIComponent('What I was doing:\\n\\nWhat happened:\\n\\n'
+    +'What I expected:\\n\\n---\\nBrowser: '+navigator.userAgent);
+  window.location.href='mailto:chunghaow@gmail.com?subject='
+    +encodeURIComponent('MinitAI feedback')+'&body='+body;
+};
+
+try{ histRender(); }catch(e){}
+
 $('recMic').onclick=function(){ recStartMode('mic'); };
 $('recTab').onclick=function(){ recStartMode('tab'); };
 $('recPause').onclick=function(){
@@ -1212,6 +1438,8 @@ $('go').onclick=async()=>{
   const fd=new FormData();fd.append('audio',file);
   fd.append('lang',$('lang').value);fd.append('hints',$('hints').value);
   fd.append('roster',$('roster').value);
+  fd.append('speakers',$('speakers') && $('speakers').checked ? '1' : '0');
+  if($('prev') && $('prev').files && $('prev').files[0]) fd.append('prev',$('prev').files[0]);
   fd.append('style',$('style').value);
   fd.append('focus',$('focus').value);
   const {ok,j}=await api('/upload',{method:'POST',body:fd});
@@ -1252,6 +1480,10 @@ async function check(id,noAuto){
     renderFiles(j.files, !noAuto);
     lastAnalysis = j.analysis || null;
     if(lastAnalysis) $('editOpen').classList.remove('hide');
+    try{
+      var tv=(j.files||{}).transcript;
+      if(tv && tv.data) histAdd(j.title, decodeURIComponent(escape(atob(tv.data))));
+    }catch(e){}
     reset(); loadMe(); loadRecent(); return;
   }
   if(j.state==='queued'&&j.ahead>0){
@@ -1434,7 +1666,10 @@ function reset(){
   $('go').disabled=true; $('go').textContent='Choose a recording first';
 }
 async function loadMe(){const {j}=await api('/me');
-  if(j.signed_in)$('quota').textContent='Used '+j.used_minutes+' of '+j.daily_limit+' minutes today.';}
+  if(j.signed_in)$('quota').textContent='Used '+j.used_minutes+' of '+j.daily_limit+' minutes today.';
+  // Only offered when a key is actually configured, so nobody ticks a box
+  // that silently does nothing.
+  if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);}
 
 async function loadRecent(){
   const {ok,j}=await api('/recent'); if(!ok||!j)return;
