@@ -4,6 +4,7 @@ Imported by web.py (the local app) and by the hosted version, which reuses the
 document generators without the local AI stack.
 """
 import os
+import re
 import time
 import json
 import imageio_ffmpeg
@@ -661,6 +662,94 @@ _LANG_RULES = {
     "auto": "Match the transcript's dominant language.",
 }
 
+# Words that carry no topic meaning, so two titles about the same thing still
+# match when one says "Cadangan pemeriksa luar" and the other "Pelantikan
+# pemeriksa luar dan dalam".
+_TOPIC_STOP = {
+    "dan", "atau", "bagi", "untuk", "pada", "dari", "daripada", "kepada",
+    "yang", "dengan", "serta", "oleh", "itu", "ini", "adalah", "ialah",
+    "tentang", "mengenai", "terhadap", "baru", "baharu",
+    "the", "and", "for", "of", "to", "on", "in", "about", "new", "item",
+}
+
+
+def _topic_key(text):
+    """Words that carry the topic, clipped so Malay affixes stop mattering.
+
+    Clipping to six characters makes "pemeriksa" and "pemeriksaan" the same
+    token without needing a real stemmer. Single accidental collisions are
+    harmless because matching still needs most of the words to agree.
+    """
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return {w[:6] for w in words if len(w) > 2 and w not in _TOPIC_STOP}
+
+
+def _same_topic(a, b):
+    """Two agenda titles describing the same thing, not necessarily worded alike."""
+    ka, kb = _topic_key(a), _topic_key(b)
+    if not ka or not kb:
+        return False
+    inter = len(ka & kb)
+    if not inter:
+        return False
+    # one title's words wholly inside the other, or half the combined words shared
+    return inter == min(len(ka), len(kb)) or inter / len(ka | kb) >= 0.5
+
+
+def _real_decision(text):
+    t = (text or "").strip().rstrip(".").lower()
+    return bool(t) and t != "no decision recorded"
+
+
+def _merge_agenda(items):
+    """Fold chunk-level agenda items that cover the same topic into one.
+
+    A two-hour meeting is analysed in chunks, and a topic raised across two
+    chunks used to produce two near-identical entries. One real meeting came
+    back with nineteen items covering about eleven topics.
+    """
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        topic = _as_text(it.get("topic")).strip()
+        disc = _as_text(it.get("discussion")).strip()
+        dec = _as_text(it.get("decision")).strip()
+        hit = next((p for p in out if _same_topic(p["topic"], topic)), None)
+        if hit is None:
+            out.append({"topic": topic, "discussion": disc, "decision": dec})
+            continue
+        if len(disc) > len(hit["discussion"]):
+            hit["discussion"] = disc
+        if _real_decision(dec):
+            if not _real_decision(hit["decision"]):
+                hit["decision"] = dec
+            elif dec.lower() not in hit["decision"].lower():
+                hit["decision"] = hit["decision"].rstrip(".") + "; " + dec
+        # The first title wins: it is where the topic was introduced, and it is
+        # usually the fuller description. Later chunks tend to abbreviate.
+    return out
+
+
+def _merge_actions(items):
+    """Same task recorded in two chunks is one task."""
+    out, seen = [], set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        task = _as_text(it.get("task")).strip()
+        if not task:
+            continue
+        key = " ".join(sorted(_topic_key(task)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"task": task,
+                    "owner": _as_text(it.get("owner")).strip(),
+                    "deadline": _as_text(it.get("deadline")).strip()})
+    return out
+
+
 def _merge_analyses(parts):
     """Merge several chunk analyses into one meeting summary."""
     if not parts:
@@ -685,6 +774,10 @@ def _merge_analyses(parts):
                     merged[f].append(item)
         merged["agenda_items"].extend(p.get("agenda_items") or [])
         merged["action_items"].extend(p.get("action_items") or [])
+    # Chunks overlap in subject matter, so fold duplicates before anything
+    # downstream counts, numbers or renders them.
+    merged["agenda_items"] = _merge_agenda(merged["agenda_items"])
+    merged["action_items"] = _merge_actions(merged["action_items"])
     # rebuild slides from the merged content
     merged["slides"] = {
         "title_slide": {"title": merged["meeting_title"] or "Meeting Minutes",
@@ -1074,6 +1167,8 @@ _DOC_LABELS = {
            "task": "Task", "owner": "Owner", "deadline": "Deadline",
            "date": "Date", "time": "Time", "location": "Location",
            "no_decision": "No decision recorded",
+           "prepared_by": "Prepared by", "verified_by": "Verified and confirmed by",
+           "name_line": "Name", "sig_date": "Date",
            "fallback_title": "Meeting Minutes"},
     "ms": {"attendees": "Kehadiran", "activities": "Aktiviti",
            "matters": "Perkara Dibincangkan", "decision": "Keputusan: ",
@@ -1083,6 +1178,8 @@ _DOC_LABELS = {
            "deadline": "Tarikh Akhir",
            "date": "Tarikh", "time": "Masa", "location": "Tempat",
            "no_decision": "Tiada keputusan direkodkan",
+           "prepared_by": "Disediakan oleh", "verified_by": "Disemak dan disahkan oleh",
+           "name_line": "Nama", "sig_date": "Tarikh",
            "fallback_title": "Minit Mesyuarat"},
     "zh": {"attendees": "出席者", "activities": "活动",
            "matters": "讨论事项", "decision": "决定: ",
@@ -1091,6 +1188,8 @@ _DOC_LABELS = {
            "task": "事项", "owner": "负责人", "deadline": "期限",
            "date": "日期", "time": "时间", "location": "地点",
            "no_decision": "未作出决定",
+           "prepared_by": "记录人", "verified_by": "审核及确认人",
+           "name_line": "姓名", "sig_date": "日期",
            "fallback_title": "会议记录"},
 }
 
@@ -1284,12 +1383,12 @@ def gen_docx(data, path):
     tr.bold = True; tr.font.size = Pt(20); tr.font.color.rgb = _RGB(0xFF, 0xFF, 0xFF)
     # meta line inside band
     mp = tc.add_paragraph()
-    meta = " · ".join(filter(None, [
-        f"{doc_labels(data)['date']}: {data.get('date','')}" if data.get('date') else "",
-        f"{doc_labels(data)['time']}: {data.get('time','')}" if data.get('time') else "",
-        f"{doc_labels(data)['location']}: {data.get('location','')}" if data.get('location') else "",
-    ]))
-    mr = mp.add_run(meta or doc_labels(data)["fallback_title"])
+    # Official minutes carry date, time and venue whether or not anyone said
+    # them aloud. A blank to fill in beats a missing line.
+    _lbl = doc_labels(data)
+    meta = " · ".join(
+        f"{_lbl[k]}: {data.get(k) or '________'}" for k in ("date", "time", "location"))
+    mr = mp.add_run(meta)
     mr.font.size = Pt(10); mr.font.color.rgb = _RGB(0xE8, 0xEC, 0xF5)
 
     doc.add_paragraph()  # spacer
@@ -1311,9 +1410,11 @@ def gen_docx(data, path):
     # ---- Agenda / discussion ----
     if data.get("agenda_items"):
         section(L["matters"])
-        for item in data["agenda_items"]:
+        for _n, item in enumerate(data["agenda_items"], 1):
             hp = doc.add_paragraph()
-            hr = hp.add_run(item.get("topic", ""))
+            # Numbered so a committee can refer to "perkara 4.0" in the next
+            # meeting instead of quoting the heading back.
+            hr = hp.add_run(f"{_n}.0  " + item.get("topic", ""))
             hr.bold = True; hr.font.size = Pt(12); hr.font.color.rgb = primary
             if item.get("discussion"):
                 doc.add_paragraph(item["discussion"])
@@ -1328,17 +1429,11 @@ def gen_docx(data, path):
                 dr.bold = True; dr.font.color.rgb = primary
                 dp.add_run(_dec)
 
-    # ---- Key points ----
-    if data.get("key_points"):
-        section(L["key_points"])
-        for k in data["key_points"]:
-            bullet(k)
-
-    # ---- Key takeaways ----
-    if data.get("key_takeaways"):
-        section(L["takeaways"])
-        for k in data["key_takeaways"]:
-            bullet(k)
+    # Key points and takeaways are deliberately NOT in the Word document.
+    # The model fills every field it is given, so with one meeting's material
+    # they came back as the agenda restated twice more in different grammar -
+    # one real meeting produced 45 bullets carrying about 15 facts. They still
+    # earn their place in the slides, where a condensed view is the point.
 
     # ---- Important notes ----
     if data.get("important_notes"):
@@ -1368,6 +1463,21 @@ def gen_docx(data, path):
             if idx % 2 == 0:
                 for c in row:
                     shade(c, "F2F5FB")
+
+    # ---- Signature block ----
+    # Minutes are not official until someone puts their name to them.
+    sig = doc.add_table(rows=1, cols=2)
+    sig.autofit = True
+    for cell, key in zip(sig.rows[0].cells, ("prepared_by", "verified_by")):
+        cp = cell.paragraphs[0]
+        cr = cp.add_run(L[key] + ":")
+        cr.bold = True; cr.font.size = Pt(10); cr.font.color.rgb = primary
+        cp.space_before = Pt(26)
+        for line in ("", "........................................",
+                     f"{L['name_line']}: ", f"{L['sig_date']}: "):
+            lp = cell.add_paragraph()
+            lr = lp.add_run(line)
+            lr.font.size = Pt(10)
 
     # ---- Footer ----
     fp = doc.add_paragraph()
