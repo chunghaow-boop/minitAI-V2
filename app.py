@@ -68,6 +68,14 @@ INLINE_LIMIT_BYTES = int(os.environ.get("MINITAI_INLINE_LIMIT_MB", "8")) * 1024 
 # in seconds.
 DOC_EXTS = (".pdf", ".pptx", ".ppt", ".docx", ".txt", ".md")
 
+# Groq's free tier allows roughly 2 hours of audio per rolling hour and about
+# 8 hours per day. A 4-hour recording therefore CANNOT finish in one go - it
+# will hit the cap halfway and fail after forty minutes of the user waiting.
+# Refuse it up front, with a number and a way forward, instead of wasting
+# their time and their daily allowance.
+GROQ_AUDIO_SECONDS_PER_HOUR = int(os.environ.get("GROQ_ASH", "7200"))
+LONG_MEETING_WARN_MINUTES = int(os.environ.get("MINITAI_WARN_MINUTES", "100"))
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -200,7 +208,8 @@ def _run_job(job_id):
                                     duration=dur, progress=prog)
         _set(job_id, state="summarising", progress=92)
         data = cloud.analyze(text, DATA_ROOT, engine.SYSTEM_PROMPT,
-                             engine.ANALYSIS_SCHEMA)
+                             engine.ANALYSIS_SCHEMA,
+                             style=job.get("style") or cloud.DEFAULT_STYLE)
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
         data = engine._drop_hallucinations(data, text)
@@ -305,6 +314,14 @@ def _headers(r):
     return r
 
 
+@app.errorhandler(413)
+def _too_big(e):
+    return jsonify({"error":
+        f"That file is larger than {MAX_UPLOAD_MB} MB. For a long meeting, "
+        f"export the audio only (not the video) - an hour of audio is around "
+        f"30 MB, while an hour of video can be over a gigabyte."}), 413
+
+
 @app.route("/health")
 def health():
     """For the host's uptime check. Reveals nothing about users."""
@@ -383,29 +400,53 @@ def upload():
     # A document has no duration; charge it a single minute so one person
     # cannot upload a thousand PDFs, but do not bill it like a long meeting.
     dur = 0 if is_doc else (engine.get_audio_duration(path) or 0)
+    # A recording longer than the provider's hourly allowance can never
+    # complete, however patiently we retry. Say so now.
+    if not is_doc and dur > GROQ_AUDIO_SECONDS_PER_HOUR:
+        os.remove(path)
+        return jsonify({"error":
+            f"That recording is {int(dur / 60)} minutes long, which is more "
+            f"than the free service can transcribe in one go "
+            f"(about {GROQ_AUDIO_SECONDS_PER_HOUR // 60} minutes). "
+            f"Split it into two halves and upload them separately - the "
+            f"minutes for each half will still be complete."}), 413
+
     ok, used = check_and_add_quota(uid, 1 if is_doc else (int(dur / 60) or 1))
     if not ok:
         os.remove(path)
-        return jsonify({"error": f"Daily limit reached ({used} of "
-                                 f"{MAX_MINUTES_PER_USER_PER_DAY} minutes). "
-                                 f"Try again tomorrow."}), 429
+        return jsonify({"error": f"You have used {used} of your "
+                                 f"{MAX_MINUTES_PER_USER_PER_DAY} minutes today. "
+                                 f"The allowance resets at midnight."}), 429
 
     job_id = secrets.token_urlsafe(12)
     _set(job_id, uid=uid, audio=path, kind=("doc" if is_doc else "audio"),
          state="queued", progress=0,
          lang=(request.form.get("lang") or "").strip(),
+         style=(request.form.get("style") or cloud.DEFAULT_STYLE).strip(),
          hints=(request.form.get("hints") or "").strip()[:400],
          created=time.time())
     _work.put(job_id)
-    return jsonify({"job": job_id, "queued_ahead": _work.qsize() - 1,
-                    "minutes": int(dur / 60)})
+    mins = int(dur / 60)
+    # Roughly a quarter of real time end to end, plus a floor for short files.
+    eta = max(1, round(mins / 4)) if mins else 1
+    return jsonify({"job": job_id, "queued_ahead": max(0, _work.qsize() - 1),
+                    "minutes": mins, "eta_minutes": eta,
+                    "long": mins >= LONG_MEETING_WARN_MINUTES})
 
 
 @app.route("/job/<job_id>")
 def job_status(job_id):
     uid = require_user()
     j = get_job(job_id)
-    if not j or j.get("uid") != uid:      # never confirm another user's job
+    if not j:
+        # Jobs live in memory. A free instance that restarts loses them, and
+        # the browser would otherwise poll a 404 forever with no explanation.
+        return jsonify({"state": "lost",
+                        "error": "The server restarted while this was being "
+                                 "processed, so it was lost. Please upload "
+                                 "again - it will not count against your "
+                                 "allowance twice."}), 410
+    if j.get("uid") != uid:               # never confirm another user's job
         return jsonify({"error": "Not found"}), 404
     return jsonify({k: v for k, v in j.items() if k not in ("uid", "audio")})
 
@@ -500,6 +541,14 @@ a.file:hover{border-color:var(--blue)}
     <option value="ta">Tamil</option>
   </select>
 
+  <label for="style">What kind of document do you want?</label>
+  <select id="style">
+    <option value="minutes" selected>Formal minutes &mdash; full official record</option>
+    <option value="executive">Executive summary &mdash; decisions and consequences only</option>
+    <option value="detailed">Detailed report &mdash; capture everything, nothing left out</option>
+    <option value="actions">Action list &mdash; who does what, by when</option>
+  </select>
+
   <label for="hints">Names and acronyms (optional, helps spelling)</label>
   <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Bil 1/2026">
 
@@ -548,6 +597,7 @@ $('go').onclick=async()=>{
   $('barWrap').classList.remove('hide');$('bar').style.width='4%';
   const fd=new FormData();fd.append('audio',file);
   fd.append('lang',$('lang').value);fd.append('hints',$('hints').value);
+  fd.append('style',$('style').value);
   const {ok,j}=await api('/upload',{method:'POST',body:fd});
   if(!ok){fail(j.error||'Upload failed.');return;}
   $('msg').textContent=j.queued_ahead>0
@@ -561,7 +611,8 @@ function fail(t){clearInterval(poll);$('msg').className='msg err';$('msg').textC
 const NICE={queued:'Waiting in the queue\\u2026',transcribing:'Listening to the recording\\u2026',
   summarising:'Writing the summary\\u2026',writing:'Building your documents\\u2026'};
 async function check(id){
-  const {ok,j}=await api('/job/'+id);
+  const {ok,j,status}=await api('/job/'+id);
+  if(status===410){fail(j.error||'That job was lost. Please upload again.');return;}
   if(!ok){fail('Lost track of that job. Please try again.');return;}
   if(j.progress!=null)$('bar').style.width=Math.max(4,j.progress)+'%';
   if(j.state==='error'){fail(j.error||'Something went wrong.');return;}

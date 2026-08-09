@@ -109,6 +109,56 @@ def pick_chat_model(data_dir):
     return _chat_model
 
 
+# --- Summary styles -------------------------------------------------------
+# One prompt cannot serve a viva committee, a project stand-up and a policy
+# paper equally well. The user picks; the shape of the JSON never changes, so
+# the document generators are untouched.
+SUMMARY_STYLES = {
+    "minutes": (
+        "Write formal meeting minutes suitable for an official file. Record "
+        "every agenda item that was actually discussed, what was said, and what "
+        "was decided. Keep the register formal and impersonal."),
+    "executive": (
+        "Write a short executive summary for someone who was not there and has "
+        "two minutes. Lead with decisions and their consequences. Merge minor "
+        "items together. Prefer four to six substantial agenda_items over a long "
+        "list of small ones. Every action item still gets recorded."),
+    "detailed": (
+        "Write a thorough record. Capture every topic raised, including items "
+        "mentioned only briefly, disagreements, and matters deferred without a "
+        "decision. Longer discussion paragraphs are welcome. Nothing that was "
+        "discussed should be absent."),
+    "actions": (
+        "Focus almost entirely on what has to happen next. action_items is the "
+        "most important field: capture every task, who owns it and when it is "
+        "due. Keep agenda_items brief - one line of context each. Leave "
+        "key_takeaways and activities empty unless genuinely important."),
+}
+DEFAULT_STYLE = "minutes"
+
+# A long transcript sent in one request loses its middle - the model attends to
+# the start and end. Above this many characters we summarise in sections and
+# merge, which is what stops agenda items going missing on a two-hour meeting.
+MAP_REDUCE_OVER_CHARS = 12000
+SECTION_CHARS = 9000
+SECTION_OVERLAP = 400
+
+
+def _split_sections(text, size=SECTION_CHARS, overlap=SECTION_OVERLAP):
+    """Split on sentence boundaries, with a small overlap so a point made
+    across a boundary is not lost by both sections."""
+    sentences = [x.strip() for x in text.replace("\n", " ").split(". ") if x.strip()]
+    out, cur = [], ""
+    for sen in sentences:
+        if len(cur) + len(sen) > size and cur:
+            out.append(cur.strip())
+            cur = cur[-overlap:] if overlap else ""
+        cur += sen + ". "
+    if cur.strip():
+        out.append(cur.strip())
+    return out or [text]
+
+
 def _post_with_retry(url, key, *, files=None, data=None, json_body=None,
                      timeout=300, attempts=4):
     """POST with backoff on 429/5xx. Groq's free tier is rate limited, and a
@@ -230,7 +280,7 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
         shutil.rmtree(work, ignore_errors=True)
 
 
-def analyze(transcript_text, data_dir, system_prompt, schema):
+def _one_pass(transcript_text, data_dir, system_prompt, schema, max_retries=4):
     """Summarise via Groq, with the same JSON schema the local engine uses,
     so the document generators see an identical shape either way."""
     key = get_key(data_dir)
@@ -258,7 +308,7 @@ def analyze(transcript_text, data_dir, system_prompt, schema):
 
     # Three attempts, most-constrained first. Models vary in what they accept,
     # and a hosted model can be retired without notice, so never depend on one.
-    attempts = [
+    formats = [
         {"type": "json_schema",
          "json_schema": {"name": "minutes", "schema": schema, "strict": False}},
         {"type": "json_object"},
@@ -266,10 +316,11 @@ def analyze(transcript_text, data_dir, system_prompt, schema):
     ]
     r = None
     last = None
-    for fmt in attempts:
+    for fmt in formats:
         try:
             r = _post_with_retry(API_ROOT + "/chat/completions", key,
-                                 json_body=_body(fmt), timeout=300)
+                                 json_body=_body(fmt), timeout=300,
+                                 attempts=max_retries)
             break
         except RuntimeError as e:
             last = e
@@ -293,3 +344,101 @@ def analyze(transcript_text, data_dir, system_prompt, schema):
         if i != -1 and j > i:
             return json.loads(t[i:j + 1])
         raise RuntimeError("The AI returned data that could not be read.")
+
+
+def _merge(parts):
+    """Combine section summaries. Reuses the desktop engine's merge so both
+    versions produce identically-shaped minutes."""
+    import watch_and_run as _engine
+    return _engine._merge_analyses([p for p in parts if p])
+
+
+def _find_missing(transcript_text, draft, data_dir, schema):
+    """Second opinion: show the model the transcript AND the draft minutes, and
+    ask only what important item was left out. This is the pass that answers
+    'are all the points there' - a single summarisation pass cannot check
+    itself."""
+    import json as _j
+    brief = {
+        "agenda_items": [i.get("topic", "") for i in (draft.get("agenda_items") or [])],
+        "decisions": [i.get("decision", "") for i in (draft.get("agenda_items") or [])],
+        "action_items": [i.get("task", "") for i in (draft.get("action_items") or [])],
+        "key_points": draft.get("key_points") or [],
+    }
+    sys_p = (
+        "You are checking a set of draft meeting minutes for omissions. You are "
+        "given the transcript and a summary of what the draft already covers. "
+        "Return JSON listing ONLY items that were genuinely discussed in the "
+        "transcript but are MISSING from the draft. If the draft is complete, "
+        "return empty arrays. Never repeat something the draft already has. "
+        "Never invent anything. Be strict: only real omissions.")
+    miss_schema = {
+        "type": "object",
+        "properties": {
+            "agenda_items": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"topic": {"type": "string"},
+                               "discussion": {"type": "string"},
+                               "decision": {"type": "string"}},
+                "required": ["topic", "discussion", "decision"]}},
+            "action_items": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"task": {"type": "string"},
+                               "owner": {"type": "string"},
+                               "deadline": {"type": "string"}},
+                "required": ["task", "owner", "deadline"]}},
+            "key_points": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["agenda_items", "action_items", "key_points"],
+    }
+    user = ("ALREADY COVERED BY THE DRAFT:\n" + _j.dumps(brief, ensure_ascii=False)
+            + "\n\nFULL TRANSCRIPT:\n" + transcript_text[:60000])
+    # attempts=1: this pass is optional, so it must not hold up the meeting.
+    return _one_pass(user, data_dir, sys_p, miss_schema, max_retries=1)
+
+
+def analyze(transcript_text, data_dir, system_prompt, schema,
+            style=DEFAULT_STYLE, completeness_check=True):
+    """Summarise a transcript.
+
+    Long transcripts are summarised in sections and merged, then checked once
+    for omissions. A single pass over a two-hour meeting silently drops the
+    middle, which is how agenda items go missing.
+    """
+    style_rule = SUMMARY_STYLES.get(style, SUMMARY_STYLES[DEFAULT_STYLE])
+    sys_p = system_prompt + "\n\nSTYLE FOR THIS DOCUMENT:\n" + style_rule
+
+    text = transcript_text or ""
+    if len(text) <= MAP_REDUCE_OVER_CHARS:
+        data = _one_pass(text, data_dir, sys_p, schema)
+    else:
+        sections = _split_sections(text)
+        logging.info(f"cloud: long transcript, {len(text)} chars -> "
+                     f"{len(sections)} sections")
+        parts = []
+        for i, sec in enumerate(sections, 1):
+            try:
+                parts.append(_one_pass(sec, data_dir, sys_p, schema))
+                logging.info(f"cloud: section {i}/{len(sections)} summarised")
+            except Exception as e:
+                # One weak section must not lose the whole meeting.
+                logging.warning(f"cloud: section {i} failed ({type(e).__name__})")
+        if not parts:
+            raise RuntimeError("None of the meeting could be summarised.")
+        data = _merge(parts)
+
+    if completeness_check and len(text) > 1500:
+        try:
+            missing = _find_missing(text, data, data_dir, schema)
+            added = 0
+            for f in ("agenda_items", "action_items", "key_points"):
+                extra = missing.get(f) or []
+                if isinstance(extra, list) and extra:
+                    data[f] = (data.get(f) or []) + extra
+                    added += len(extra)
+            if added:
+                logging.info(f"cloud: completeness pass added {added} missed item(s)")
+        except Exception as e:
+            # A failed check must never cost the user their minutes.
+            logging.info(f"cloud: completeness check skipped ({type(e).__name__})")
+    return data

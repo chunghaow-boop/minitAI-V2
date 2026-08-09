@@ -293,6 +293,133 @@ check("Upload widget offers documents too", ".pdf" in _page2 or ".pdf" in client
 check("Unsupported types name what IS supported",
       "document (pdf" in open("app.py").read())
 
+# ------------------------------------- summary quality: styles + coverage
+check("Four summary styles exist", set(_cl2.SUMMARY_STYLES) ==
+      {"minutes", "executive", "detailed", "actions"})
+check("Default style is formal minutes", _cl2.DEFAULT_STYLE == "minutes")
+_pg3 = client().get("/").data.decode()
+for _st in ("minutes", "executive", "detailed", "actions"):
+    check(f"Style '{_st}' offered in the UI", f'value="{_st}"' in _pg3)
+check("Chosen style is sent to the server", "fd.append('style'" in _pg3)
+
+# The style must actually change the instruction the model receives
+_seen2 = []
+_STUB = {"meeting_title":"T","date":"","time":"","location":"","attendees":["A"],
+  "agenda_items":[{"topic":"X","discussion":"Y","decision":"Z"}],"activities":["a"],
+  "key_points":["k"],"key_takeaways":["t"],"important_notes":["n"],
+  "action_items":[{"task":"t","owner":"o","deadline":"d"}],
+  "theme":{"primary_hex":"1E2761","accent_hex":"FFD500","mood":"m"},
+  "slides":{"title_slide":{"title":"T","subtitle":""},
+            "content_slides":[{"heading":"H","bullets":["b"]}]}}
+class _Cap:
+    status_code = 200
+    def json(s): return {"choices":[{"message":{"content":_j2.dumps(_STUB)}}]}
+_cl2.requests.post = lambda url, **kw: (_seen2.append(kw.get("json") or {}), _Cap())[1]
+_cl2.get_key = lambda d: "k"
+try:
+    _seen2.clear()
+    _cl2.analyze("Ringkas.", "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA,
+                 style="actions", completeness_check=False)
+    check("Style reaches the model",
+          "action_items is the most important" in _seen2[0]["messages"][0]["content"])
+    _seen2.clear()
+    _cl2.analyze("Ringkas.", "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA,
+                 style="executive", completeness_check=False)
+    check("A different style sends a different instruction",
+          "two minutes" in _seen2[0]["messages"][0]["content"])
+
+    # Long transcripts must be summarised in sections, not one giant request
+    _seen2.clear()
+    _long = "Perkara ini dibincangkan dengan panjang lebar oleh jawatankuasa. " * 500
+    _cl2.analyze(_long, "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA,
+                 completeness_check=False)
+    check(f"Long meeting is split into sections ({len(_seen2)} calls)", len(_seen2) > 1)
+    check("Each section is well under the single-shot limit",
+          all(len(c["messages"][1]["content"]) <= _cl2.SECTION_CHARS + 1200
+              for c in _seen2))
+
+    # The completeness pass must run and must be able to add missed items
+    _calls3 = []
+    def _two_stage(url, **kw):
+        b = kw.get("json") or {}
+        _calls3.append(b)
+        sysmsg = b["messages"][0]["content"]
+        if "checking a set of draft meeting minutes" in sysmsg:
+            return type("R", (), {"status_code": 200, "json": staticmethod(
+                lambda: {"choices":[{"message":{"content": _j2.dumps({
+                    "agenda_items":[{"topic":"Perkara terlepas","discussion":"d","decision":"x"}],
+                    "action_items":[], "key_points":["Titik terlepas"]})}}]})})()
+        return _Cap()
+    _cl2.requests.post = _two_stage
+    _res3 = _cl2.analyze("Mesyuarat panjang. " * 200, "/tmp", "Base.",
+                         A.engine.ANALYSIS_SCHEMA, completeness_check=True)
+    check("A completeness check runs after the summary",
+          any("checking a set of draft" in c["messages"][0]["content"] for c in _calls3))
+    check("Missed agenda items are added back",
+          any(i.get("topic") == "Perkara terlepas" for i in _res3.get("agenda_items", [])))
+    check("Missed key points are added back", "Titik terlepas" in _res3.get("key_points", []))
+
+    # A failed completeness check must never cost the user their minutes
+    def _flaky2(url, **kw):
+        b = kw.get("json") or {}
+        if "checking a set of draft" in b["messages"][0]["content"]:
+            return type("R", (), {"status_code": 500, "json": staticmethod(lambda: {})})()
+        return _Cap()
+    _cl2.requests.post = _flaky2
+    _res4 = _cl2.analyze("Mesyuarat. " * 200, "/tmp", "Base.", A.engine.ANALYSIS_SCHEMA)
+    check("A failed completeness check still returns the minutes",
+          bool(_res4.get("meeting_title")))
+finally:
+    _cl2.requests.post = _op3
+    _cl2.get_key = _okey
+
+# --------------------------------- long meetings and concurrent users
+# A 3-5 hour recording cannot finish on the free tier however long we retry,
+# and failing 40 minutes in is the worst possible way to find that out.
+_o_dur2 = A.engine.get_audio_duration
+A.engine.get_audio_duration = lambda p: 4 * 3600      # a 4-hour meeting
+try:
+    _r_long = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 5000), "long.wav")},
+                     content_type="multipart/form-data")
+    check(f"A 4-hour recording is refused up front ({_r_long.status_code})",
+          _r_long.status_code == 413)
+    _m = str((_r_long.get_json() or {}).get("error", ""))
+    check("The refusal says how long it actually is", "240 minutes" in _m)
+    check("The refusal tells the user what to do instead", "Split it" in _m)
+finally:
+    A.engine.get_audio_duration = _o_dur2
+
+# A meeting inside the limit reports an honest estimate
+A.engine.get_audio_duration = lambda p: 100 * 60
+try:
+    _r_ok = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 5000), "ok.wav")},
+                   content_type="multipart/form-data")
+    _jj = _r_ok.get_json() or {}
+    check(f"A 100-minute meeting is accepted ({_r_ok.status_code})", _r_ok.status_code == 200)
+    check("An ETA is returned", isinstance(_jj.get("eta_minutes"), int) and _jj["eta_minutes"] > 0)
+    check("Long meetings are flagged for the UI", _jj.get("long") is True)
+finally:
+    A.engine.get_audio_duration = _o_dur2
+
+# A job lost to a restart must explain itself, not 404 forever
+_lost = a.get("/job/definitely-not-a-real-job-id")
+check(f"A lost job returns 410, not 404 ({_lost.status_code})", _lost.status_code == 410)
+check("A lost job explains the restart",
+      "restarted" in str((_lost.get_json() or {}).get("error", "")))
+check("A lost job reassures about the allowance",
+      "allowance twice" in str((_lost.get_json() or {}).get("error", "")))
+check("Browser handles the lost-job status", "status===410" in client().get("/").data.decode())
+
+# Oversized uploads must name the limit and the fix
+check("413 handler explains the size limit and the fix",
+      "export the audio only" in open("app.py").read())
+
+# Concurrency: one user's job must never be visible to another, even queued
+_ja = a.post("/upload", data={"audio": (io.BytesIO(b"y" * 5000), "mine.wav")},
+             content_type="multipart/form-data").get_json().get("job")
+check("Second user cannot poll the first user's queued job",
+      b.get("/job/" + _ja).status_code == 404)
+
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
