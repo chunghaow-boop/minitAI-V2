@@ -206,6 +206,14 @@ def _post_with_retry(url, key, *, files=None, data=None, json_body=None,
         if detail:
             logging.warning(f"cloud: Groq {r.status_code} - {detail}")
         raise RuntimeError(f"Groq rejected the request ({r.status_code}). {detail}".strip())
+    if last == "rate limited":
+        # Everyone on this server shares one free account, so this is a fleet
+        # problem, not the user's fault. Say so in words they can act on.
+        raise RuntimeError(
+            "MinitAI's free transcription allowance is used up for now - too "
+            "many meetings in the last hour. It frees up again shortly, so "
+            "please try this recording later, or use the desktop version, "
+            "which has no limit.")
     raise RuntimeError(f"Groq did not respond after {attempts} tries ({last}).")
 
 
