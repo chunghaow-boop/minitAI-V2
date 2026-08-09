@@ -580,6 +580,12 @@ def me():
     return jsonify({"signed_in": True, "used_minutes": used,
                     "daily_limit": MAX_MINUTES_PER_USER_PER_DAY,
                     "speakers_available": cloud.diarisation_available(),
+                    # A browser OAuth client id is public by design - it is
+                    # embedded in the page. There is no client secret in this
+                    # flow and no token ever reaches this server, which is the
+                    # point: the disk here is wiped whenever the free instance
+                    # sleeps, so it is the last place to keep a Google token.
+                    "google_client_id": (os.environ.get("GOOGLE_CLIENT_ID") or "").strip(),
                     "retention_hours": RETENTION_HOURS})
 
 
@@ -959,6 +965,34 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
 margin-top:10px}
 #recMeter>i{display:block;height:100%;width:0;background:var(--blue);
 transition:width .1s linear}
+/* --- the first thing anybody sees --- */
+body:has(#loginCard:not(.hide)){background:
+  radial-gradient(60rem 40rem at 15% -10%, #24356b 0%, transparent 60%),
+  radial-gradient(50rem 34rem at 95% 8%, #3a2a5e 0%, transparent 55%),
+  var(--bg);
+  background-attachment:fixed}
+#loginCard{animation:rise .5s cubic-bezier(.2,.8,.2,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+#welcome{text-align:center;margin-bottom:22px}
+#welcome h2{font-size:19px;margin:12px 0 6px;color:var(--txt);font-weight:600}
+#welcome p{font-size:13px;color:var(--muted);line-height:1.65;margin:0 auto;
+max-width:32ch}
+#hello{display:block;margin:0 auto}
+#helloBody{transform-origin:48px 61px;animation:hover 4s ease-in-out infinite}
+@keyframes hover{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+#helloEyes{transform-origin:48px 40px;animation:botblink 5s infinite}
+#helloTip{animation:tip 2.6s ease-in-out infinite}
+@keyframes tip{0%,100%{opacity:.55}50%{opacity:1}}
+#helloArm{transform-origin:80px 46px;animation:wave 3.4s ease-in-out infinite}
+@keyframes wave{0%,72%,100%{transform:rotate(0)}
+80%{transform:rotate(-24deg)}88%{transform:rotate(6deg)}}
+#pills{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:14px}
+#pills span{font-size:11px;color:#A9B6D4;background:var(--card2);
+border:1px solid var(--line);border-radius:999px;padding:5px 10px}
+#code:focus{outline:none;border-color:var(--blue);
+box-shadow:0 0 0 3px rgba(74,110,224,.18)}
+@media (prefers-reduced-motion:reduce){
+  #helloBody,#helloEyes,#helloArm,#helloTip,#loginCard,#botBob{animation:none}}
 /* --- how much is left today --- */
 #quotaChip{background:var(--card2);border:1px solid var(--line);border-radius:12px;
 padding:11px 13px;margin-bottom:14px}
@@ -1032,10 +1066,38 @@ text-transform:uppercase;letter-spacing:.4px}
 <div class="sub">Meeting audio in. Professional minutes out.</div>
 
 <div class="card {{ 'hide' if signed_in else '' }}" id="loginCard">
+  <div id="welcome">
+    <svg viewBox="0 0 96 84" width="104" height="92" aria-hidden="true" id="hello">
+      <ellipse cx="48" cy="78" rx="26" ry="4" fill="#000" opacity=".28"/>
+      <g id="helloBody">
+        <line x1="48" y1="12" x2="48" y2="19" stroke="#7E9BE0" stroke-width="2.4"/>
+        <circle cx="48" cy="9" r="4" fill="#FFD500" id="helloTip"/>
+        <rect x="20" y="19" width="56" height="42" rx="15" fill="#EAF0FF"/>
+        <rect x="28" y="30" width="40" height="20" rx="10" fill="#161B29"/>
+        <g id="helloEyes" fill="#8FB4FF">
+          <circle cx="39" cy="40" r="4.4"/><circle cx="57" cy="40" r="4.4"/>
+        </g>
+        <path d="M41 54q7 4 14 0" stroke="#9FB2D8" stroke-width="2.2"
+              fill="none" stroke-linecap="round"/>
+        <rect x="11" y="33" width="7" height="13" rx="3.5" fill="#CBD9FF"/>
+        <g id="helloArm"><rect x="78" y="33" width="7" height="13" rx="3.5"
+             fill="#CBD9FF"/></g>
+      </g>
+    </svg>
+    <h2>Minutes, without the typing.</h2>
+    <p>Record a meeting in Malay or English. Get formal minutes, slides and a
+      full transcript in a few minutes.</p>
+    <div id="pills">
+      <span>Malay &middot; English &middot; rojak</span>
+      <span>Word + slides + transcript</span>
+      <span>Nothing kept afterwards</span>
+    </div>
+  </div>
   <label for="code">Invite code</label>
   <input id="code" type="password" autocomplete="one-time-code" placeholder="Enter your invite code">
   <button id="loginBtn">Sign in</button>
   <div class="msg err hide" id="loginMsg"></div>
+  <div class="note" style="text-align:center">No code? Ask Gavril for yours.</div>
 </div>
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
@@ -1131,6 +1193,23 @@ text-transform:uppercase;letter-spacing:.4px}
   <button id="go" disabled>Choose a recording first</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
   <div class="msg" id="msg" role="status" aria-live="polite"></div>
+  <div id="drivePast" class="hide">
+    <label style="margin-top:4px">Your meetings in Google Drive</label>
+    <div class="note" style="margin:0 0 6px">Saved permanently in your own Drive
+      &mdash; these survive even though the server clears itself.</div>
+    <div id="drivePastList"></div>
+  </div>
+
+  <div id="driveWrap" class="hide">
+    <button type="button" class="rec" id="driveBtn"
+            style="width:100%;margin-top:10px">Save a copy to my Google Drive</button>
+    <label id="driveAutoWrap" style="display:flex;align-items:center;gap:8px;
+           margin-top:8px;font-size:12px;color:var(--muted)">
+      <input type="checkbox" id="driveAuto" style="width:auto;margin:0">
+      <span>Do this automatically from now on</span></label>
+    <div class="note hide" id="driveOut"></div>
+  </div>
+
   <div id="preview" class="hide"></div>
   <div id="files"></div>
 
@@ -1619,6 +1698,7 @@ $('fbLink').onclick=function(e){
 
 try{ histRender(); }catch(e){}
 try{ micCheck(); }catch(e){}
+try{ setTimeout(driveReconnect, 1200); }catch(e){}
 
 $('privLink').onclick=function(e){
   e.preventDefault(); $('priv').classList.toggle('hide');
@@ -1689,6 +1769,12 @@ async function check(id,noAuto){
     $('msg').className='msg ok';
     $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
     renderFiles(j.files, false);   // nothing saves itself; you choose
+    driveFiles = j.files;
+    if(window.MINITAI_GOOGLE){
+      $('driveWrap').classList.remove('hide');
+      $('driveOut').classList.add('hide');
+      if($('driveAuto').checked) driveSave(driveFiles, true);
+    }
     lastAnalysis = j.analysis || null;
     if(lastAnalysis){ $('editOpen').classList.remove('hide'); showPreview(lastAnalysis); }
     try{
@@ -1735,6 +1821,178 @@ function renderFiles(files, autoSave){
   // below survives a refresh.
   if(first&&autoSave)setTimeout(function(){try{first.click();}catch(e){}},400);
 }
+
+// ------------------------------------------------------------ Google Drive
+// Browser to Google directly. The token never touches the MinitAI server, and
+// the scope is drive.file, which grants access ONLY to files this app puts
+// there - it cannot see anything else in your Drive.
+//
+// Google's script is loaded lazily, on the first click. Someone who never uses
+// Drive still loads a page that fetches nothing from the internet.
+var GIS_SRC='https://accounts.google.com/gsi/client';
+var driveToken=null, driveTokenClient=null, driveFiles=null, gisReady=null;
+
+function loadGis(){
+  if(gisReady) return gisReady;
+  gisReady=new Promise(function(res,rej){
+    var t=document.createElement('script');
+    t.src=GIS_SRC; t.async=true; t.defer=true;
+    t.onload=res; t.onerror=function(){ rej(new Error('Could not reach Google.')); };
+    document.head.appendChild(t);
+  });
+  return gisReady;
+}
+
+async function driveAuth(clientId){
+  if(driveToken) return driveToken;
+  await loadGis();
+  return new Promise(function(res,rej){
+    try{
+      driveTokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: function(r){
+          if(r && r.access_token){ driveToken=r.access_token; res(driveToken); }
+          else rej(new Error('Google did not grant access.'));
+        },
+        error_callback: function(){ rej(new Error('Google sign-in was closed.')); }
+      });
+      driveTokenClient.requestAccessToken({prompt: driveToken ? '' : 'consent'});
+    }catch(e){ rej(e); }
+  });
+}
+
+// One folder, so a year of meetings is not scattered through My Drive.
+async function driveFolder(token){
+  var q=encodeURIComponent(
+    "mimeType='application/vnd.google-apps.folder' and name='MinitAI' and trashed=false");
+  var r=await fetch('https://www.googleapis.com/drive/v3/files?q='+q+'&fields=files(id)',
+    {headers:{Authorization:'Bearer '+token}});
+  var j=await r.json();
+  if(j.files && j.files.length) return j.files[0].id;
+  var mk=await fetch('https://www.googleapis.com/drive/v3/files',
+    {method:'POST',headers:{Authorization:'Bearer '+token,
+      'Content-Type':'application/json'},
+     body:JSON.stringify({name:'MinitAI',
+       mimeType:'application/vnd.google-apps.folder'})});
+  return (await mk.json()).id;
+}
+
+async function blobOf(v){
+  if(v.data){
+    var bin=atob(v.data), buf=new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
+    return new Blob([buf]);
+  }
+  // Too big to travel inline; fetch it back from the signed link.
+  var r=await fetch(v.url);
+  if(!r.ok) throw new Error('Could not read '+v.name);
+  return await r.blob();
+}
+
+async function driveUpload(token, folder, name, blob, mime){
+  var meta={name:name, parents:[folder]};
+  var body=new FormData();
+  body.append('metadata', new Blob([JSON.stringify(meta)],{type:'application/json'}));
+  body.append('file', blob);
+  var r=await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+    {method:'POST',headers:{Authorization:'Bearer '+token},body:body});
+  if(!r.ok) throw new Error('Google rejected '+name+' ('+r.status+')');
+  return await r.json();
+}
+
+async function driveSave(files, silent){
+  var cid=(window.MINITAI_GOOGLE||'');
+  if(!cid || !files) return;
+  var out=$('driveOut'); out.classList.remove('hide');
+  out.textContent='Saving to Google Drive\u2026';
+  try{
+    var token=await driveAuth(cid);
+    var folder=await driveFolder(token);
+    var links=[];
+    for(var k in files){
+      if(!files.hasOwnProperty(k)) continue;
+      var v=files[k];
+      var got=await driveUpload(token, folder, v.name, await blobOf(v),
+                                FILE_MIME[k]||'application/octet-stream');
+      if(got.webViewLink) links.push({name:v.name, url:got.webViewLink});
+    }
+    try{ localStorage.setItem('minitai.driveLinked','1'); }catch(e){}
+    out.innerHTML='Saved to the <b>MinitAI</b> folder in your Google Drive'
+      + (links.length ? ' \u2014 <a href="'+links[0].url
+         +'" target="_blank" rel="noopener" style="color:var(--blue)">open it</a>.' : '.');
+  }catch(e){
+    out.textContent = (e && e.message ? e.message : 'Could not save to Drive.')
+      + ' Your download links still work.';
+    if(silent) $('driveAuto').checked=false;   // stop retrying quietly
+  }
+}
+
+// Drive is where the history actually lives. The server wipes its disk every
+// time it sleeps; your Drive does not. drive.file lets us list the files this
+// app created and nothing else.
+async function driveList(token){
+  var folder=await driveFolder(token);
+  var q=encodeURIComponent("'"+folder+"' in parents and trashed=false");
+  var r=await fetch('https://www.googleapis.com/drive/v3/files?q='+q
+    +'&orderBy=createdTime desc&pageSize=40'
+    +'&fields=files(id,name,createdTime,webViewLink)',
+    {headers:{Authorization:'Bearer '+token}});
+  var j=await r.json();
+  return j.files||[];
+}
+
+function renderDrivePast(files){
+  if(!files || !files.length){ $('drivePast').classList.add('hide'); return; }
+  // One row per meeting, not per file: three documents share a name.
+  var seen={}, rows=[];
+  files.forEach(function(f){
+    var key=f.name.replace(/ (minit|slaid|transkrip)[^ ]*$/i,'');
+    if(!seen[key]){ seen[key]={name:key, when:(f.createdTime||'').slice(0,10), parts:[]};
+                    rows.push(seen[key]); }
+    seen[key].parts.push(f);
+  });
+  var h='';
+  rows.slice(0,12).forEach(function(m){
+    h+='<a class="file" href="'+m.parts[0].webViewLink+'" target="_blank" rel="noopener">'
+      + esc(m.name) + '<br><span style="font-size:12px;color:var(--muted)">'
+      + esc(m.when) + ' &middot; ' + m.parts.length + ' file'
+      + (m.parts.length===1?'':'s') + '</span></a>';
+  });
+  $('drivePastList').innerHTML=h;
+  $('drivePast').classList.remove('hide');
+}
+
+// Only for people who have already connected once. Nobody gets a Google
+// pop-up just for opening MinitAI.
+async function driveReconnect(){
+  var cid=(window.MINITAI_GOOGLE||'');
+  var linked=false;
+  try{ linked = localStorage.getItem('minitai.driveLinked')==='1'; }catch(e){}
+  if(!cid || !linked) return;
+  try{
+    await loadGis();
+    var token=await new Promise(function(res,rej){
+      var tc=google.accounts.oauth2.initTokenClient({
+        client_id:cid, scope:'https://www.googleapis.com/auth/drive.file',
+        callback:function(r){ r && r.access_token ? res(r.access_token) : rej(0); },
+        error_callback:function(){ rej(0); }});
+      tc.requestAccessToken({prompt:''});      // silent; no dialog
+    });
+    driveToken=token;
+    renderDrivePast(await driveList(token));
+  }catch(e){ /* not signed in to Google right now; stay quiet */ }
+}
+
+$('driveBtn').onclick=async function(){
+  await driveSave(driveFiles, false);
+  try{ localStorage.setItem('minitai.driveLinked','1'); }catch(e){}
+  if(driveToken){ try{ renderDrivePast(await driveList(driveToken)); }catch(e){} }
+};
+$('driveAuto').onchange=function(){
+  try{ localStorage.setItem('minitai.driveAuto', $('driveAuto').checked?'1':'0'); }catch(e){}
+};
 
 // ---------------------------------------------------------------- preview
 // Seeing what came out, before deciding whether to download it. Without this
@@ -1906,6 +2164,7 @@ $('editSave').onclick=async function(){
     lastAnalysis=collectEditor();
     showPreview(lastAnalysis);
     renderFiles(j.files,false);      // no auto-download; they asked for this one
+    driveFiles=j.files;
     $('msg').className='msg ok';
     $('msg').textContent='Rebuilt'+(j.title?' \\u2014 '+j.title:'')+'. Tap to download.';
     $('editWrap').classList.add('hide'); $('editOpen').classList.remove('hide');
@@ -1940,7 +2199,9 @@ async function loadMe(){const {j}=await api('/me');
   }
   // Only offered when a key is actually configured, so nobody ticks a box
   // that silently does nothing.
-  if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);}
+  if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);
+  window.MINITAI_GOOGLE = j.google_client_id || '';
+  try{ $('driveAuto').checked = localStorage.getItem('minitai.driveAuto')==='1'; }catch(e){}}
 
 async function loadRecent(){
   const {ok,j}=await api('/recent'); if(!ok||!j)return;

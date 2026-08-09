@@ -277,8 +277,24 @@ else:
 check("Page fetches nothing from the internet",
       not any(_re.search(r'https?://', t) for t in _tags))
 _ext = set(_re.findall(r'https?://[^\s"\'<>()]+', page))
-check("The only outbound link is the WhatsApp share",
-      all(u.startswith("https://wa.me/") for u in _ext))
+# Google's script and API are referenced, but nothing reaches out on load:
+# the script tag is only appended when someone clicks "Save to Google Drive",
+# so a user who never touches Drive still loads a page that fetches nothing.
+_ALLOWED_HOSTS = ("https://wa.me/", "https://accounts.google.com/gsi/client",
+                  "https://www.googleapis.com/")
+check("Every outbound URL is one we chose deliberately",
+      all(u.startswith(_ALLOWED_HOSTS) for u in _ext))
+check("Google's script is loaded on demand, not on page load",
+      "GIS_SRC" in page and "createElement('script')" in page
+      and 'src="https://accounts.google.com' not in page)
+check("Drive history is offered without a pop-up on every visit",
+      "driveReconnect" in page and "prompt:''" in page
+      and "minitai.driveLinked" in page)
+check("Drive is off unless a client id is configured",
+      "google_client_id" in open("app.py").read())
+
+check("Drive uses the narrow scope that only sees files we create",
+      "auth/drive.file" in page and "auth/drive'" not in page)
 
 # ---------------------------------------------- Groq request shape
 # The first live deploy failed with HTTP 400 on BOTH json_schema and
