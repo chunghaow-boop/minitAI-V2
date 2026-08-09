@@ -160,8 +160,15 @@ check("Finished jobs come back too, not just running ones",
 _p = client().get("/").data.decode()
 check("Page reconnects to a running job on load", "resume(" in _p and "/recent" in _p)
 check("Page warns before you navigate away mid-job", "beforeunload" in _p)
-check("Only one file downloads automatically (browsers block the rest)",
-      _p.count("first.click()") == 1)
+# Nothing downloads by itself any more. The automatic save was there because
+# Recent documents did not exist yet; now it does, and a file appearing in
+# Downloads unasked is worse than a file you tapped for.
+check("Nothing downloads automatically", "renderFiles(j.files, false)" in _p)
+check("The page says so plainly", "Nothing has been saved to your computer yet" in _p)
+check("Options are collapsed, not all on screen at once", '<details id="adv"' in _p)
+check("There is a results preview", 'id="preview"' in _p and "function showPreview" in _p)
+check("Help is a fixed bubble, not buried down the page",
+      'id="helpBubble"' in _p and "position:fixed" in _p)
 check("There is a way to sign out", "signout" in _p)
 
 # ------------------------------------------------- shared service budget

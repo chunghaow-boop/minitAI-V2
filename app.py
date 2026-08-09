@@ -249,6 +249,18 @@ def _previous_text(f):
             pass
 
 
+def _safe_name(title, stamp, suffix):
+    """A filename someone can recognise in their Downloads folder.
+
+    "2026-08-09_16-04_minutes.docx" tells you nothing when three of them are
+    sitting there. "Mesyuarat Pasca Fakulti 2026-08-09 1604 minit.docx" does.
+    """
+    clean = re.sub(r"[^\w\s\-()]", "", (title or "").strip(), flags=re.UNICODE)
+    clean = re.sub(r"\s+", " ", clean).strip()[:60]
+    parts = [p for p in (clean, stamp.replace("_", " ")) if p]
+    return " ".join(parts) + " " + suffix
+
+
 def _seed(job):
     """What the transcriber is told to expect: the hint words and the roster.
 
@@ -334,10 +346,11 @@ def _run_job(job_id):
             keep=[n.strip() for n in (job.get("roster") or "").splitlines() if n.strip()])
 
         _set(job_id, state="writing", progress=96)
-        stamp = time.strftime("%Y-%m-%d_%H-%M")
-        docx = os.path.join(out, f"{stamp}_minutes.docx")
-        pptx = os.path.join(out, f"{stamp}_slides.pptx")
-        txt = os.path.join(out, f"{stamp}_transcript.txt")
+        stamp = time.strftime("%Y-%m-%d %H%M")
+        base = data.get("meeting_title") or "Minit Mesyuarat"
+        docx = os.path.join(out, _safe_name(base, stamp, "minit.docx"))
+        pptx = os.path.join(out, _safe_name(base, stamp, "slaid.pptx"))
+        txt = os.path.join(out, _safe_name(base, stamp, "transkrip.txt"))
         engine.gen_docx(data, docx)
         engine.gen_pptx(data, pptx)
         with open(txt, "w", encoding="utf-8") as f:
@@ -672,9 +685,10 @@ def regenerate():
         return jsonify({"error": "That summary is empty - nothing to put in a "
                                  "document."}), 400
     out = user_dir(uid, "out")
-    stamp = time.strftime("%Y-%m-%d_%H-%M")
-    docx = os.path.join(out, f"{stamp}_minutes_edited.docx")
-    pptx = os.path.join(out, f"{stamp}_slides_edited.pptx")
+    stamp = time.strftime("%Y-%m-%d %H%M")
+    base = data.get("meeting_title") or "Minit Mesyuarat"
+    docx = os.path.join(out, _safe_name(base, stamp, "minit (dibetulkan).docx"))
+    pptx = os.path.join(out, _safe_name(base, stamp, "slaid (dibetulkan).pptx"))
     try:
         engine.gen_docx(data, docx)
         engine.gen_pptx(data, pptx)
@@ -907,6 +921,42 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
 margin-top:10px}
 #recMeter>i{display:block;height:100%;width:0;background:var(--blue);
 transition:width .1s linear}
+/* --- collapsed options --- */
+#adv{margin-top:14px;border:1px solid var(--line);border-radius:12px;
+padding:0 12px;background:var(--card2)}
+#adv[open]{padding-bottom:10px}
+#adv>summary{cursor:pointer;padding:13px 0;font-size:13px;color:var(--muted);
+list-style:none}
+#adv>summary::-webkit-details-marker{display:none}
+#adv>summary::after{content:' \25BE';float:right}
+#adv[open]>summary::after{content:' \25B4'}
+/* --- what you actually got --- */
+#preview{background:var(--card2);border:1px solid var(--line);border-radius:12px;
+padding:14px;margin-top:12px}
+#preview h3{margin:0 0 2px;font-size:15px;color:var(--txt)}
+#preview .meta{font-size:12px;color:var(--muted);margin-bottom:10px}
+#preview ol{margin:0;padding-left:18px;font-size:13px;line-height:1.7}
+#preview li{margin-bottom:2px}
+#preview .dec{color:var(--muted)}
+#preview .more{font-size:12px;color:var(--muted);margin-top:8px}
+/* --- help bubble --- */
+#helpBubble{position:fixed;right:18px;bottom:18px;width:54px;height:54px;
+border-radius:50%;background:var(--blue);border:0;cursor:pointer;padding:0;
+box-shadow:0 6px 18px rgba(0,0,0,.45);z-index:50;width:54px}
+#helpFace{display:block;color:#fff;font-size:13px;letter-spacing:3px;
+animation:blink 4.5s infinite;transform:translateY(-2px)}
+@keyframes blink{0%,92%,100%{opacity:1}95%{opacity:.15}}
+#helpBubble:hover{transform:scale(1.06)}
+#helpPanel{position:fixed;right:18px;bottom:84px;width:min(340px,calc(100vw - 36px));
+background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;
+box-shadow:0 10px 30px rgba(0,0,0,.5);z-index:50}
+#helpHead{display:flex;justify-content:space-between;align-items:center;
+font-size:14px;margin-bottom:8px}
+#helpClose{cursor:pointer;color:var(--muted);font-size:20px;line-height:1}
+#helpLog{max-height:230px;overflow-y:auto;font-size:13px;line-height:1.6;
+margin-bottom:8px}
+#helpLog .q{color:var(--muted);margin-top:8px}
+#helpLog .a{color:var(--txt);margin-top:2px}
 /* --- edit before export --- */
 #editForm{margin-top:10px}
 #editForm .row{background:var(--card2);border:1px solid var(--line);
@@ -954,6 +1004,9 @@ text-transform:uppercase;letter-spacing:.4px}
             style="width:100%;margin-top:10px">Pause</button>
     <button type="button" id="recStop">Stop and use this recording</button>
   </div>
+
+  <details id="adv">
+  <summary>Meeting details and options</summary>
 
   <label for="lang">Language spoken in the meeting</label>
   <select id="lang">
@@ -1013,10 +1066,21 @@ text-transform:uppercase;letter-spacing:.4px}
            border-radius:10px;color:var(--txt);font-size:14px;padding:11px;
            font-family:inherit;resize:vertical"></textarea>
 
+  </details>
+
   <button id="go" disabled>Choose a recording first</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
   <div class="msg" id="msg"></div>
+  <div id="preview" class="hide"></div>
   <div id="files"></div>
+
+  <div id="recentWrap" class="hide">
+    <label style="margin-top:18px">Recent documents</label>
+    <div class="note" style="margin:0 0 6px">Still here if you closed the page
+      or refreshed by accident. These sit on the server, and the server clears
+      them when it goes to sleep &mdash; often within the hour, and after
+      {{ retention }} hours at the latest. Save anything you want to keep.</div>
+    <div id="recent"></div>
 
   <button type="button" class="rec hide" id="editOpen"
           style="width:100%;margin-top:10px">Fix something before you save</button>
@@ -1044,20 +1108,7 @@ text-transform:uppercase;letter-spacing:.4px}
     <div class="note hide" id="askOut"></div>
   </div>
 
-  <label style="margin-top:18px">Need help?</label>
-  <input id="helpQ" placeholder="e.g. kenapa lambat nak buka? / how do I record a Zoom call?">
-  <button type="button" class="rec" id="helpBtn"
-          style="width:100%;margin-top:8px">Ask about MinitAI</button>
-  <div class="note hide" id="helpOut"></div>
-  <div class="note"><a id="fbLink" href="#" style="color:var(--muted)">Send Gavril
-    feedback about MinitAI</a></div>
-  <div id="recentWrap" class="hide">
-    <label style="margin-top:18px">Recent documents</label>
-    <div class="note" style="margin:0 0 6px">Still here if you closed the page
-      or refreshed by accident. These sit on the server, and the server clears
-      them when it goes to sleep &mdash; often within the hour, and after
-      {{ retention }} hours at the latest. Save anything you want to keep.</div>
-    <div id="recent"></div>
+
   </div>
   <div class="note" style="text-align:right">
     <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
@@ -1073,6 +1124,21 @@ text-transform:uppercase;letter-spacing:.4px}
   <button type="button" class="rec" id="wipeBtn"
           style="width:100%;margin-top:10px">Delete everything of mine on the server</button>
   <div class="note hide" id="wipeMsg"></div>
+</div>
+
+<!-- Help lives in a corner, not in the page. The old version put it 3,200px
+     down a 4,100px page: you pressed Ask, the answer rendered far below the
+     fold, and it looked broken. -->
+<button type="button" id="helpBubble" aria-label="Help">
+  <span id="helpFace">&#9679;&#9679;</span></button>
+<div id="helpPanel" class="hide">
+  <div id="helpHead"><b>MinitAI help</b>
+    <span id="helpClose" role="button" aria-label="Close">&times;</span></div>
+  <div id="helpLog"></div>
+  <input id="helpQ" placeholder="Tanya apa-apa / ask me anything">
+  <button type="button" id="helpBtn">Ask</button>
+  <div class="note" style="margin-top:8px">
+    <a id="fbLink" href="#" style="color:var(--muted)">Tell Gavril something is wrong</a></div>
 </div>
 <script>
 const $=i=>document.getElementById(i);
@@ -1392,15 +1458,30 @@ $('askBtn').onclick=async function(){
 };
 
 // ------------------------------------------------------------------ help
+function helpSay(cls, text){
+  var d=document.createElement('div'); d.className=cls; d.textContent=text;
+  $('helpLog').appendChild(d); $('helpLog').scrollTop=$('helpLog').scrollHeight;
+  return d;
+}
+$('helpBubble').onclick=function(){
+  var p=$('helpPanel'); p.classList.toggle('hide');
+  if(!p.classList.contains('hide')){
+    if(!$('helpLog').children.length)
+      helpSay('a','Hi! Ask me anything about MinitAI \u2014 in Malay or English.');
+    $('helpQ').focus();
+  }
+};
+$('helpClose').onclick=function(){ $('helpPanel').classList.add('hide'); };
 $('helpBtn').onclick=async function(){
   var q=$('helpQ').value.trim(); if(!q) return;
-  $('helpOut').classList.remove('hide'); $('helpOut').textContent='Thinking\u2026';
+  helpSay('q','You: '+q); $('helpQ').value='';
+  var waiting=helpSay('a','Thinking\u2026');
   try{
     var r=await fetch('/help',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({q:q})});
     var j=await r.json();
-    $('helpOut').textContent=j.answer||'Ask Gavril.';
-  }catch(e){ $('helpOut').textContent='Help is unavailable right now. Ask Gavril.'; }
+    waiting.textContent=j.answer||'Ask Gavril.';
+  }catch(e){ waiting.textContent='Help is unavailable right now. Ask Gavril.'; }
 };
 $('helpQ').addEventListener('keydown',function(e){ if(e.key==='Enter')$('helpBtn').click(); });
 
@@ -1479,9 +1560,9 @@ async function check(id,noAuto){
     $('barWrap').classList.add('hide');
     $('msg').className='msg ok';
     $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
-    renderFiles(j.files, !noAuto);
+    renderFiles(j.files, false);   // nothing saves itself; you choose
     lastAnalysis = j.analysis || null;
-    if(lastAnalysis) $('editOpen').classList.remove('hide');
+    if(lastAnalysis){ $('editOpen').classList.remove('hide'); showPreview(lastAnalysis); }
     try{
       var tv=(j.files||{}).transcript;
       if(tv && tv.data) histAdd(j.title, decodeURIComponent(escape(atob(tv.data))));
@@ -1517,14 +1598,42 @@ function renderFiles(files, autoSave){
     $('files').appendChild(a);
   });
   $('files').insertAdjacentHTML('beforeend',
-    '<div class="note">The minutes save to your downloads automatically. '
-    +'Tap the other two if you want them as well.</div>');
+    '<div class="note">Nothing has been saved to your computer yet \u2014 tap '
+    +'whichever you want.</div>');
   addShare(files);
   // Only ONE automatic download. Browsers challenge the second and third
   // with a "allow multiple downloads?" prompt that people dismiss, and the
   // files were then lost. The rest stay one tap away, and Recent documents
   // below survives a refresh.
   if(first&&autoSave)setTimeout(function(){try{first.click();}catch(e){}},400);
+}
+
+// ---------------------------------------------------------------- preview
+// Seeing what came out, before deciding whether to download it. Without this
+// the only way to know if the minutes were any good was to open the file.
+function showPreview(d){
+  if(!d){ $('preview').classList.add('hide'); return; }
+  var items=d.agenda_items||[], acts=d.action_items||[], att=d.attendees||[];
+  var h='<h3>'+esc(d.meeting_title||'Minit Mesyuarat')+'</h3>';
+  var bits=[];
+  if(d.date) bits.push(esc(d.date));
+  if(d.location) bits.push(esc(d.location));
+  bits.push(items.length+(items.length===1?' perkara':' perkara'));
+  bits.push(acts.length+(acts.length===1?' tindakan':' tindakan'));
+  if(att.length) bits.push(att.length+' hadir');
+  h+='<div class="meta">'+bits.join(' &middot; ')+'</div>';
+  if(items.length){
+    h+='<ol>';
+    items.slice(0,6).forEach(function(it){
+      h+='<li>'+esc(it.topic||'');
+      if(it.decision) h+='<br><span class="dec">'+esc(it.decision).slice(0,90)+'</span>';
+      h+='</li>';
+    });
+    h+='</ol>';
+    if(items.length>6) h+='<div class="more">and '+(items.length-6)+' more in the document</div>';
+  }
+  $('preview').innerHTML=h;
+  $('preview').classList.remove('hide');
 }
 
 // ------------------------------------------------------------------- sharing
@@ -1538,6 +1647,25 @@ function blobFor(v){
   for(var i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
   return new Blob([buf],{type:FILE_MIME.docx});
 }
+var SHARE_CSS='display:block;text-align:center;padding:11px 8px;'
+  +'border-radius:10px;text-decoration:none;flex:1';
+function shareMsg(title){
+  return encodeURIComponent('Minit mesyuarat: '+title
+    +' \u2014 dokumen Word dilampirkan. (Dijana dengan MinitAI.)');
+}
+function waLink(title){
+  var w=document.createElement('a');
+  w.className='rec'; w.style.cssText=SHARE_CSS; w.target='_blank'; w.rel='noopener';
+  w.href='https://wa.me/?text='+shareMsg(title); w.textContent='Send on WhatsApp';
+  return w;
+}
+function mailLink(title){
+  var m=document.createElement('a');
+  m.className='rec'; m.style.cssText=SHARE_CSS;
+  m.href='mailto:?subject='+encodeURIComponent('Minit mesyuarat: '+title)
+    +'&body='+shareMsg(title); m.textContent='Send by email';
+  return m;
+}
 function addShare(files){
   var v=(files||{}).docx; if(!v) return;
   var title=($('msg').textContent||'Minit mesyuarat').replace(/^Done \u2014 /,'');
@@ -1549,22 +1677,21 @@ function addShare(files){
   if(f && navigator.canShare && navigator.canShare({files:[f]})){
     var b=document.createElement('button');
     b.type='button'; b.className='rec'; b.textContent='Share the document';
-    b.onclick=function(){ navigator.share({files:[f],title:title}).catch(function(){}); };
+    b.onclick=function(){
+      // Never swallow this. Desktop Chrome reports it can share a file and
+      // then refuses, and a button that does nothing at all reads as broken.
+      navigator.share({files:[f],title:title}).catch(function(err){
+        if(err && err.name==='AbortError') return;      // they closed the sheet
+        wrap.innerHTML='';
+        wrap.appendChild(waLink(title)); wrap.appendChild(mailLink(title));
+        $('files').insertAdjacentHTML('beforeend',
+          '<div class="note">This browser would not hand the file over. Use '
+          +'WhatsApp or email and attach the document you downloaded.</div>');
+      });
+    };
     wrap.appendChild(b);
   } else {
-    var msg=encodeURIComponent('Minit mesyuarat: '+title
-      +' \u2014 dokumen Word dilampirkan. (Dijana dengan MinitAI.)');
-    var w=document.createElement('a');
-    w.className='rec'; w.style.cssText='display:block;text-align:center;padding:11px 8px;'
-      +'border-radius:10px;text-decoration:none;flex:1';
-    w.target='_blank'; w.rel='noopener';
-    w.href='https://wa.me/?text='+msg; w.textContent='Send on WhatsApp';
-    var m=document.createElement('a');
-    m.className='rec'; m.style.cssText=w.style.cssText;
-    m.href='mailto:?subject='+encodeURIComponent('Minit mesyuarat: '+title)
-      +'&body='+msg; m.textContent='Send by email';
-    wrap.appendChild(w); wrap.appendChild(m);
-    wrap.insertAdjacentHTML('afterend','');
+    wrap.appendChild(waLink(title)); wrap.appendChild(mailLink(title));
   }
   $('files').appendChild(wrap);
   if(!(f && navigator.canShare && navigator.canShare({files:[f]}))){
@@ -1649,6 +1776,7 @@ $('editSave').onclick=async function(){
     var j=await r.json();
     if(!r.ok) throw new Error(j.error||'Rebuild failed.');
     lastAnalysis=collectEditor();
+    showPreview(lastAnalysis);
     renderFiles(j.files,false);      // no auto-download; they asked for this one
     $('msg').className='msg ok';
     $('msg').textContent='Rebuilt'+(j.title?' \\u2014 '+j.title:'')+'. Tap to download.';
