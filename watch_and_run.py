@@ -266,8 +266,16 @@ WHAT GOES WHERE
     topic      = what it was about, a few words
     discussion = what was said, 1-3 sentences, neutral and factual
     decision   = what was agreed. If nothing was agreed, write "No decision recorded".
-- action_items: only where someone was actually given a task.
-    owner = the person named. If no one was named, leave owner empty.
+- action_items: anything that still has to be DONE after this meeting.
+    A decision almost always creates one. "Meluluskan X" means someone now has
+    to carry X out; "borang perlu dihantar" is an action even though no name was
+    said. Record it. An action with nobody named is still an action - the
+    committee needs the list, and the owner can be filled in by hand.
+    Do NOT leave action_items empty just because the meeting never said
+    "you do this". Read the decisions and the "perlu / need to / should"
+    sentences and write down what each one obliges someone to do.
+    task = the thing to be done, phrased as an instruction.
+    owner = the person named, or empty if nobody was named.
     deadline = only if a date or timeframe was stated.
 - key_points: the substantive facts raised.
 - key_takeaways: what matters going forward.
@@ -367,6 +375,22 @@ def get_audio_duration(path):
             return h * 3600 + mi * 60 + s
     except Exception as e:
         logging.warning(f"duration probe failed: {e}")
+    # A file recorded in the browser has no duration in its header - MediaRecorder
+    # writes the stream as it goes and never goes back to fill it in. Decoding is
+    # the only way to find out, and it is fast: a two-hour file takes a few
+    # seconds. Without this a browser recording of any length is charged one
+    # minute and skips the too-long check.
+    try:
+        p = _sp.run([_ffmpeg_exe(), "-i", path, "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=300)
+        hits = _re.findall(r"time=\s*(\d+):(\d+):(\d+\.?\d*)", p.stderr or "")
+        if hits:
+            h, mi, s = hits[-1]
+            secs = int(h) * 3600 + int(mi) * 60 + float(s)
+            if secs > 0:
+                return secs
+    except Exception as e:
+        logging.warning(f"duration decode failed: {e}")
     return None
 
 
@@ -673,15 +697,57 @@ _TOPIC_STOP = {
 }
 
 
-def _topic_key(text):
-    """Words that carry the topic, clipped so Malay affixes stop mattering.
+# Malay builds words with affixes, so "tukar" and "pertukaran" are the same
+# subject written two ways. Stripping them is what lets the two be recognised
+# as one agenda item. peN-/meN- swallow the root's first letter, which is why
+# "pemeriksa" has to become "periksa" and not "eriksa".
+_MS_PREFIX = (("menge", ""), ("penge", ""), ("meng", "k"), ("peng", "k"),
+              ("meny", "s"), ("peny", "s"), ("mem", "p"), ("pem", "p"),
+              ("men", "t"), ("pen", "t"), ("ber", ""), ("ter", ""),
+              ("per", ""), ("me", ""), ("pe", ""), ("di", ""), ("ke", ""))
+_MS_SUFFIX = ("kannya", "annya", "nya", "kan", "an")
 
-    Clipping to six characters makes "pemeriksa" and "pemeriksaan" the same
-    token without needing a real stemmer. Single accidental collisions are
-    harmless because matching still needs most of the words to agree.
-    """
+
+def _ms_stem(w):
+    for pre, restore in _MS_PREFIX:
+        if w.startswith(pre) and len(w) - len(pre) >= 3:
+            rest = w[len(pre):]
+            if restore and rest[0] in "aeiou":
+                rest = restore + rest
+            w = rest
+            break
+    for suf in _MS_SUFFIX:
+        if w.endswith(suf) and len(w) - len(suf) >= 3:
+            return w[:-len(suf)]
+    return w
+
+
+def _topic_key(text):
+    """The words that carry the topic, reduced to their stems."""
     words = re.findall(r"[a-z0-9]+", (text or "").lower())
-    return {w[:6] for w in words if len(w) > 2 and w not in _TOPIC_STOP}
+    return {_ms_stem(w) for w in words if len(w) > 2 and w not in _TOPIC_STOP}
+
+
+def _fuzzy_overlap(ka, kb):
+    """Shared stems, allowing for the transcript misspelling one of them.
+
+    Whisper wrote the same word as "kolokium" once and "kolekium" the next
+    time; exact matching treats those as two different subjects.
+    """
+    import difflib
+    hits = 0
+    left = set(kb)
+    for a in ka:
+        if a in left:
+            hits += 1
+            left.discard(a)
+            continue
+        near = next((b for b in left
+                     if difflib.SequenceMatcher(None, a, b).ratio() >= 0.85), None)
+        if near:
+            hits += 1
+            left.discard(near)
+    return hits
 
 
 def _same_topic(a, b):
@@ -689,11 +755,11 @@ def _same_topic(a, b):
     ka, kb = _topic_key(a), _topic_key(b)
     if not ka or not kb:
         return False
-    inter = len(ka & kb)
+    inter = _fuzzy_overlap(ka, kb)
     if not inter:
         return False
     # one title's words wholly inside the other, or half the combined words shared
-    return inter == min(len(ka), len(kb)) or inter / len(ka | kb) >= 0.5
+    return inter == min(len(ka), len(kb)) or inter / (len(ka) + len(kb) - inter) >= 0.5
 
 
 def _real_decision(text):

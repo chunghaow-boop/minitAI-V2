@@ -668,6 +668,18 @@ a.file:hover{border-color:var(--blue)}
 .err{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
 .note{font-size:12px;color:var(--muted);line-height:1.6;margin-top:14px}
 .hide{display:none}
+/* --- live recording --- */
+#recBar{display:flex;gap:9px;margin-top:10px}
+button.rec{background:var(--card2);border:1px solid var(--line);color:var(--txt);
+font-size:13px;padding:11px 8px;border-radius:10px}
+button.rec:hover:not(:disabled){border-color:var(--blue)}
+#recLive{border:1px solid var(--red);border-radius:12px;padding:14px;margin-top:10px;
+text-align:center}
+#recDot{display:inline-block;width:10px;height:10px;border-radius:50%;
+background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+#recTime{font-size:20px;font-variant-numeric:tabular-nums;color:var(--txt)}
+#recStop{margin-top:12px;background:var(--red)}
 </style></head><body><div class="wrap">
 <h1>MinitAI</h1>
 <div class="sub">Meeting audio in. Professional minutes out.</div>
@@ -688,6 +700,18 @@ a.file:hover{border-color:var(--blue)}
       deck or teaching material. No recording needed.</span></div>
   <input id="file" type="file" class="hide"
          accept="audio/*,video/*,.pdf,.docx,.pptx,.ppt,.txt,.md">
+
+  <div id="recBar">
+    <button type="button" class="rec" id="recMic">Record the room</button>
+    <button type="button" class="rec" id="recTab">Record an online meeting</button>
+  </div>
+  <div class="note" id="recNote" style="margin-top:8px"></div>
+
+  <div id="recLive" class="hide">
+    <div><span id="recDot"></span><span id="recTime">0:00</span></div>
+    <div class="note" style="margin-top:6px" id="recHint"></div>
+    <button type="button" id="recStop">Stop and use this recording</button>
+  </div>
 
   <label for="lang">Language spoken in the meeting</label>
   <select id="lang">
@@ -772,6 +796,173 @@ function pick(f){if(!f)return;file=f;
   // starting a second job would orphan the first one's progress.
   if(running){$('go').textContent='Still working on the last one\\u2026';return;}
   $('go').disabled=false;$('go').textContent='Make the minutes';}
+
+// ---------------------------------------------------------------- recording
+// Record straight into the page so nobody has to find a file on their phone
+// and work out how to get it here. Screen capture is desktop only - no mobile
+// browser implements it - so phones get the microphone, which is the right
+// tool for a meeting held in a room anyway.
+var rec=null, recChunks=[], recStreams=[], recTimer=null, recStart=0, recLock=null;
+var CAN_TAB = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+var CAN_MIC = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+function recMime(){
+  var want=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+  for(var i=0;i<want.length;i++){
+    if(window.MediaRecorder && MediaRecorder.isTypeSupported(want[i])) return want[i];
+  }
+  return '';
+}
+if(!CAN_MIC || !window.MediaRecorder){
+  $('recBar').classList.add('hide');
+  $('recNote').textContent='This browser cannot record. Upload a file instead.';
+} else if(!CAN_TAB){
+  $('recTab').disabled=true;
+  $('recNote').textContent='Recording an online meeting needs a laptop \\u2014 phones '
+    +'cannot capture a call. On a phone, "Record the room" is the one to use.';
+} else {
+  $('recNote').textContent='Tell everyone you are recording before you start. '
+    +'MinitAI does not announce itself the way Google Meet does.';
+}
+
+function fmt(s){
+  var m=Math.floor(s/60), r=s%60;
+  return m+':'+(r<10?'0':'')+r;
+}
+
+async function recStartMode(mode){
+  if(rec||running) return;
+  recChunks=[]; recStreams=[];
+  var ac, dest, gotTab=false;
+  try{
+    ac=new (window.AudioContext||window.webkitAudioContext)();
+    dest=ac.createMediaStreamDestination();
+    if(mode==='tab'){
+      // Chrome will not share audio without a video surface, so ask for both
+      // and simply never record the picture.
+      var ds=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+      recStreams.push(ds);
+      if(ds.getAudioTracks().length){
+        ac.createMediaStreamSource(ds).connect(dest); gotTab=true;
+      }
+      var vt=ds.getVideoTracks()[0];
+      if(vt) vt.onended=function(){ recStopNow(); };
+    }
+    var ms=await navigator.mediaDevices.getUserMedia({audio:true});
+    recStreams.push(ms);
+    ac.createMediaStreamSource(ms).connect(dest);
+  }catch(e){
+    recCleanup();
+    $('msg').className='msg err';
+    if(e.name==='NotAllowedError'){
+      $('msg').textContent='Recording was blocked. Click the padlock next to the '
+        +'web address, set Microphone to Allow, then try again.';
+    } else if(e.name==='NotFoundError'){
+      $('msg').textContent='No microphone found on this device.';
+    } else if(!window.isSecureContext){
+      $('msg').textContent='Recording needs a secure connection. Open the site '
+        +'with a secure address and try again.';
+    } else {
+      $('msg').textContent='Could not start recording: '+(e.message||e.name);
+    }
+    return;
+  }
+  if(mode==='tab' && !gotTab){
+    $('recHint').textContent='No meeting audio captured \\u2014 you did not tick '
+      +'"Also share tab audio". Only your microphone is being recorded.';
+  } else if(mode==='tab'){
+    $('recHint').textContent='Recording the meeting and your microphone. Keep this '
+      +'tab open.';
+  } else {
+    $('recHint').textContent='Recording the microphone. Keep this tab in front and '
+      +'the screen on, or the phone will stop it.';
+  }
+  var mt=recMime();
+  try{
+    rec = mt ? new MediaRecorder(dest.stream,{mimeType:mt})
+             : new MediaRecorder(dest.stream);
+  }catch(e){
+    recCleanup();
+    $('msg').className='msg err';
+    $('msg').textContent='This browser refused to record: '+(e.message||e.name);
+    return;
+  }
+  rec.ondataavailable=function(e){ if(e.data && e.data.size) recChunks.push(e.data); };
+  rec.onstop=recFinish;
+  rec.start(5000);           // flush every 5s so a crash loses seconds, not hours
+  if(navigator.wakeLock && navigator.wakeLock.request){
+    navigator.wakeLock.request('screen').then(function(l){ recLock=l; },function(){});
+  }
+  recStart=Date.now();
+  $('recBar').classList.add('hide');
+  $('recLive').classList.remove('hide');
+  $('recTime').textContent='0:00';
+  // How much recording this person can still have accepted today. Finding out
+  // AFTER a two-hour meeting that it will be refused is the worst possible
+  // moment, so warn while there is still time to wrap up.
+  var budget=0;
+  fetch('/me').then(function(r){ return r.json(); }).then(function(j){
+    if(j && j.signed_in) budget=Math.max(0,(j.daily_limit||0)-(j.used_minutes||0));
+  }).catch(function(){});
+  recTimer=setInterval(function(){
+    var secs=Math.floor((Date.now()-recStart)/1000);
+    $('recTime').textContent=fmt(secs);
+    var mins=secs/60;
+    if(budget && mins>budget){
+      $('recTime').style.color='#F87171';
+      $('recHint').textContent='Past your allowance for today ('+budget+' min). '
+        +'This recording will be refused. Stop and split it, or try tomorrow.';
+    } else if(budget && mins>budget-5){
+      $('recHint').textContent='About '+Math.max(0,Math.round(budget-mins))
+        +' min of your daily allowance left.';
+    } else if(secs>6900){
+      $('recTime').style.color='#FBBF24';
+      $('recHint').textContent='Approaching the two-hour limit. Anything longer is '
+        +'refused - stop soon and record the rest separately.';
+    }
+  },1000);
+}
+
+// A refresh or a closed tab loses the whole recording, because the audio is
+// held in this page and nowhere else.
+window.addEventListener('beforeunload',function(e){
+  if(rec && rec.state!=='inactive'){ e.preventDefault(); e.returnValue=''; }
+});
+
+function recStopNow(){
+  if(rec && rec.state!=='inactive') rec.stop();
+}
+
+function recFinish(){
+  var mt=(rec && rec.mimeType) || 'audio/webm';
+  var ext = mt.indexOf('mp4')>-1 ? '.mp4' : (mt.indexOf('ogg')>-1 ? '.ogg' : '.webm');
+  var secs=Math.max(1,Math.round((Date.now()-recStart)/1000));
+  var blob=new Blob(recChunks,{type:mt.split(';')[0]});
+  recCleanup();
+  if(blob.size<2048){
+    $('msg').className='msg err';
+    $('msg').textContent='That recording came out empty. Check the microphone permission.';
+    return;
+  }
+  var name='meeting-'+fmt(secs).replace(':','m')+'s'+ext;
+  pick(new File([blob],name,{type:blob.type}));
+  $('msg').className='msg';
+  $('msg').textContent='Recording ready \\u2014 '+fmt(secs)+'. Press "Make the minutes".';
+}
+
+function recCleanup(){
+  if(recTimer){ clearInterval(recTimer); recTimer=null; }
+  recStreams.forEach(function(s){ s.getTracks().forEach(function(t){ t.stop(); }); });
+  recStreams=[]; rec=null;
+  $('recTime').style.color='';
+  if(recLock){ try{ recLock.release(); }catch(e){} recLock=null; }
+  $('recLive').classList.add('hide');
+  $('recBar').classList.remove('hide');
+}
+
+$('recMic').onclick=function(){ recStartMode('mic'); };
+$('recTab').onclick=function(){ recStartMode('tab'); };
+$('recStop').onclick=recStopNow;
 
 $('go').onclick=async()=>{
   if(!file||running)return;
