@@ -62,6 +62,12 @@ MAX_MINUTES_PER_USER_PER_DAY = int(os.environ.get("MINITAI_DAILY_MINUTES", "240"
 # user still gets them after the free instance sleeps and clears its disk.
 INLINE_LIMIT_BYTES = int(os.environ.get("MINITAI_INLINE_LIMIT_MB", "8")) * 1024 * 1024
 
+# Documents, not just recordings. A PDF, a lecture deck or a Word report can be
+# summarised with the SAME pipeline minus transcription - the engine already
+# knows how to read them. Text-only jobs cost no transcription quota and finish
+# in seconds.
+DOC_EXTS = (".pdf", ".pptx", ".ppt", ".docx", ".txt", ".md")
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -177,16 +183,21 @@ def _run_job(job_id):
     uid, audio_path = job["uid"], job["audio"]
     out = user_dir(uid, "out")
     try:
-        _set(job_id, state="transcribing", progress=0)
-        dur = engine.get_audio_duration(audio_path)
+        if job.get("kind") == "doc":
+            _set(job_id, state="reading", progress=30)
+            dur = 0
+            text = engine.extract_text_from_file(audio_path)
+        else:
+            _set(job_id, state="transcribing", progress=0)
+            dur = engine.get_audio_duration(audio_path)
 
-        def prog(i, n):
-            _set(job_id, progress=int(i * 90 / max(1, n)))
+            def prog(i, n):
+                _set(job_id, progress=int(i * 90 / max(1, n)))
 
-        text = cloud.transcribe(audio_path, DATA_ROOT, engine._ffmpeg_exe(),
-                                language=job.get("lang") or None,
-                                prompt=job.get("hints") or None,
-                                duration=dur, progress=prog)
+            text = cloud.transcribe(audio_path, DATA_ROOT, engine._ffmpeg_exe(),
+                                    language=job.get("lang") or None,
+                                    prompt=job.get("hints") or None,
+                                    duration=dur, progress=prog)
         _set(job_id, state="summarising", progress=92)
         data = cloud.analyze(text, DATA_ROOT, engine.SYSTEM_PROMPT,
                              engine.ANALYSIS_SCHEMA)
@@ -355,8 +366,11 @@ def upload():
     if not f or not f.filename:
         return jsonify({"error": "No audio file received."}), 400
     ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in engine.AUDIO_EXTS:
-        return jsonify({"error": f"Unsupported file type: {ext}"}), 400
+    is_doc = ext in DOC_EXTS
+    if not is_doc and ext not in engine.AUDIO_EXTS:
+        return jsonify({"error": f"Unsupported file type: {ext}. Upload a "
+                                 f"recording (mp3, mp4, m4a, wav...) or a "
+                                 f"document (pdf, docx, pptx, txt)."}), 400
 
     inbox = user_dir(uid, "in")
     safe = f"{int(time.time())}_{secrets.token_hex(4)}{ext}"
@@ -366,8 +380,10 @@ def upload():
         os.remove(path)
         return jsonify({"error": "That file is empty or corrupt."}), 400
 
-    dur = engine.get_audio_duration(path) or 0
-    ok, used = check_and_add_quota(uid, int(dur / 60) or 1)
+    # A document has no duration; charge it a single minute so one person
+    # cannot upload a thousand PDFs, but do not bill it like a long meeting.
+    dur = 0 if is_doc else (engine.get_audio_duration(path) or 0)
+    ok, used = check_and_add_quota(uid, 1 if is_doc else (int(dur / 60) or 1))
     if not ok:
         os.remove(path)
         return jsonify({"error": f"Daily limit reached ({used} of "
@@ -375,7 +391,8 @@ def upload():
                                  f"Try again tomorrow."}), 429
 
     job_id = secrets.token_urlsafe(12)
-    _set(job_id, uid=uid, audio=path, state="queued", progress=0,
+    _set(job_id, uid=uid, audio=path, kind=("doc" if is_doc else "audio"),
+         state="queued", progress=0,
          lang=(request.form.get("lang") or "").strip(),
          hints=(request.form.get("hints") or "").strip()[:400],
          created=time.time())
@@ -465,10 +482,14 @@ a.file:hover{border-color:var(--blue)}
 </div>
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
-  <div id="drop">Tap to choose a recording &mdash; or drop it here<br>
-    <span style="font-size:12px">Audio or video &mdash; mp3, mp4, m4a, wav, mov,
-    mkv, phone voice memos. Video has its audio pulled out automatically.</span></div>
-  <input id="file" type="file" accept="audio/*,video/*" class="hide">
+  <div id="drop">Tap to choose a file &mdash; or drop it here<br>
+    <span style="font-size:12px">
+      <b>Recording</b>: mp3, mp4, m4a, wav, mov, mkv, phone voice memos &mdash;
+      video has its audio pulled out automatically.<br>
+      <b>Document</b>: pdf, docx, pptx, txt &mdash; summarise a report, a lecture
+      deck or teaching material. No recording needed.</span></div>
+  <input id="file" type="file" class="hide"
+         accept="audio/*,video/*,.pdf,.docx,.pptx,.ppt,.txt,.md">
 
   <label for="lang">Language spoken in the meeting</label>
   <select id="lang">

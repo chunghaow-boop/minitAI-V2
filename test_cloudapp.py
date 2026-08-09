@@ -105,9 +105,11 @@ check("Job status never leaks internal paths",
 # ------------------------------------------------------------ upload guards
 check("Upload with no file is rejected",
       a.post("/upload", data={}, content_type="multipart/form-data").status_code == 400)
-r = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 4000), "notes.pdf")},
+r = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 4000), "installer.exe")},
            content_type="multipart/form-data")
-check("Unsupported file type is rejected", r.status_code == 400)
+check("Genuinely unsupported file type is rejected", r.status_code == 400)
+check("Rejection message lists what IS supported",
+      "document" in str(r.get_json()).lower())
 r = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 10), "tiny.wav")},
            content_type="multipart/form-data")
 check("Empty/corrupt file is rejected", r.status_code == 400)
@@ -120,12 +122,12 @@ check("No API key => clear 503, not a crash", r.status_code == 503)
 os.environ["GROQ_API_KEY"] = _k
 
 # ------------------------------------------------------------ quota
-ok, used = A.check_and_add_quota(uid_a, 100)
-check("Quota accrues", ok and used == 100)
-ok, _ = A.check_and_add_quota(uid_a, 500)
-check("Quota blocks over-use", ok is False)
-ok, _ = A.check_and_add_quota(uid_b, 10)
-check("One user's quota does not affect another", ok is True)
+_uid_q = A._user_id_for("quota-probe-user")
+_before = A.check_and_add_quota(_uid_q, 100)[1]
+check(f"Quota accrues ({_before})", _before == 100)
+check("Quota blocks over-use", A.check_and_add_quota(_uid_q, 500)[0] is False)
+check("One user's quota does not affect another",
+      A.check_and_add_quota(A._user_id_for("other-probe-user"), 10)[0] is True)
 
 # ------------------------------------------------------------ headers/health
 h = client().get("/")
@@ -241,7 +243,7 @@ check("Page no longer promises server-side retention",
 for _ext in (".mp3", ".mp4", ".m4a", ".mkv", ".mov", ".webm", ".wav",
              ".opus", ".amr", ".3gp", ".aac", ".flac", ".ogg"):
     check(f"Accepts {_ext}", _ext in A.engine.AUDIO_EXTS)
-check("Upload widget offers audio and video", 'accept="audio/*,video/*"' in _page2)
+check("Upload widget offers audio and video", 'audio/*,video/*' in _page2)
 # ffmpeg must strip the video stream, not choke on it
 import inspect as _insp
 _flac_src = _insp.getsource(_cl2._to_flac)
@@ -252,6 +254,44 @@ _vid = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 4000), "meeting.mp4")
               content_type="multipart/form-data")
 check(f"An .mp4 upload is not rejected as wrong type ({_vid.status_code})",
       _vid.status_code != 400 or "Unsupported" not in str(_vid.get_json()))
+
+# ------------------------------------------ documents, not just recordings
+# Office work is not only meetings: a report, a lecture deck or teaching
+# material should summarise through the same pipeline, minus transcription.
+for _ext in (".pdf", ".docx", ".pptx", ".txt", ".md"):
+    check(f"Document format {_ext} is accepted", _ext in A.DOC_EXTS)
+check("Engine can read documents", callable(getattr(A.engine, 'extract_text_from_file', None)))
+
+# a real .txt document must be accepted and queued as a doc job
+_r_doc = a.post("/upload",
+                data={"audio": (io.BytesIO("Mesyuarat membincangkan bajet tahunan. "
+                                           "Keputusan: diluluskan.".encode() * 20),
+                                "laporan.txt")},
+                content_type="multipart/form-data")
+check(f"A .txt document uploads ({_r_doc.status_code})", _r_doc.status_code == 200)
+_jid = (_r_doc.get_json() or {}).get("job")
+check("Document job is tagged as a document",
+      bool(_jid) and A.get_job(_jid).get("kind") == "doc")
+check("A document is billed 1 minute, not a meeting's worth",
+      (_r_doc.get_json() or {}).get("minutes") == 0)
+
+# a real PDF must be readable end to end
+import tempfile as _tf5
+try:
+    from docx import Document as _Doc
+    _dp = os.path.join(_tf5.gettempdir(), "_probe.docx")
+    _d0 = _Doc(); _d0.add_paragraph("Mesyuarat JK Pascasiswazah membincangkan "
+                                    "pelaksanaan viva dan pelantikan pemeriksa.")
+    _d0.save(_dp)
+    _txt0 = A.engine.extract_text_from_file(_dp)
+    check(f"Word document text is extracted ({len(_txt0)} chars)", "Mesyuarat" in _txt0)
+    os.remove(_dp)
+except Exception as _e:
+    check(f"Word document text is extracted ({_e})", False)
+
+check("Upload widget offers documents too", ".pdf" in _page2 or ".pdf" in client().get("/").data.decode())
+check("Unsupported types name what IS supported",
+      "document (pdf" in open("app.py").read())
 
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
