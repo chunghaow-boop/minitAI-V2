@@ -1,0 +1,19 @@
+# One-click deploy on Render's free tier.
+# Set the three env vars marked sync:false in the dashboard - never in this file.
+services:
+  - type: web
+    name: minitai
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY      # your Groq key - paste in the dashboard
+        sync: false
+      - key: INVITE_CODES      # comma separated, one per person
+        sync: false
+      - key: MINITAI_SECRET    # long random string; keeps logins alive
+        sync: false
+      - key: MINITAI_RETENTION_HOURS
+        value: "24"
+      - key: MINITAI_DAILY_MINUTES
+        value: "240"
