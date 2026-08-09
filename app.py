@@ -960,6 +960,27 @@ function recCleanup(){
   $('recBar').classList.remove('hide');
 }
 
+// ------------------------------------------------------- remembered settings
+// It is the same committee every month, so retyping a dozen names each time is
+// friction nobody tolerates - and an empty names box is why the transcript
+// invents spellings. Kept in this browser only: the server's disk is wiped
+// whenever the free instance sleeps, so it could not hold this if it tried.
+(function(){
+  var KEYS=['hints','lang','style'];
+  try{
+    KEYS.forEach(function(k){
+      var v=localStorage.getItem('minitai.'+k);
+      if(v!==null && $(k)) $(k).value=v;
+      if($(k)) $(k).addEventListener('change',function(){
+        try{ localStorage.setItem('minitai.'+k,$(k).value); }catch(e){}
+      });
+    });
+    if($('hints')) $('hints').addEventListener('blur',function(){
+      try{ localStorage.setItem('minitai.hints',$('hints').value); }catch(e){}
+    });
+  }catch(e){}         // private browsing blocks storage; not worth failing over
+})();
+
 $('recMic').onclick=function(){ recStartMode('mic'); };
 $('recTab').onclick=function(){ recStartMode('tab'); };
 $('recStop').onclick=recStopNow;

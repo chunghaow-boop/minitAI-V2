@@ -1311,6 +1311,59 @@ def _as_text(v):
     return str(v)
 
 
+_TITLES = {"prof", "profesor", "dr", "datuk", "dato", "datin", "tuan", "puan",
+           "encik", "cik", "tn", "pn", "en", "madya", "ir", "ts", "haji", "hajah",
+           "yb", "ybhg", "mr", "mrs", "ms", "miss"}
+
+
+def _name_core(name):
+    """The name with titles and punctuation stripped, for comparison only."""
+    words = [w for w in re.findall(r"[A-Za-z']+", name)
+             if w.lower().strip("'") not in _TITLES]
+    return " ".join(words).lower()
+
+
+def _clean_attendees(names):
+    """One person, one spelling, and no bare titles.
+
+    A transcript produced two attendees called "Prof." with no name attached,
+    and wrote the same person as "Dr. Zuleti" and "Dr. Zulaiti".
+
+    Only certain duplicates are merged. Names that merely LOOK alike are left
+    alone and reported instead: quietly collapsing two colleagues into one
+    would be a worse error in official minutes than listing a name twice, and
+    only a human knows whether Hafizah and Hafizal are the same person.
+
+    Returns (attendees, warnings).
+    """
+    import difflib
+    out, warn = [], []
+    for n in names:
+        core = _name_core(n)
+        if not core:
+            continue                      # "Prof." on its own is not a person
+        hit = near = None
+        for i, (prev_core, _prev) in enumerate(out):
+            if core == prev_core:
+                hit = i
+                break
+            r = difflib.SequenceMatcher(None, core, prev_core).ratio()
+            if r >= 0.90:
+                hit = i
+                break
+            if r >= 0.75 and near is None:
+                near = i
+        if hit is not None:
+            if len(n) > len(out[hit][1]):
+                out[hit] = (out[hit][0], n)   # keep the fullest spelling
+            continue
+        if near is not None:
+            warn.append(f"\"{out[near][1]}\" dan \"{n}\" mungkin orang yang sama - "
+                        f"sila semak ejaan nama.")
+        out.append((core, n))
+    return [n for _, n in out], warn
+
+
 def normalise_analysis(data):
     """Force a model's output into the exact shape the document generators
     expect, whatever it actually produced.
@@ -1328,9 +1381,15 @@ def normalise_analysis(data):
     for f in ("meeting_title", "date", "time", "location"):
         data[f] = _as_text(data.get(f)).strip()
 
-    data["attendees"] = [_as_text(a).strip() for a in _as_list(data.get("attendees")) if _as_text(a).strip()]
+    data["attendees"], _name_warnings = _clean_attendees(
+        [_as_text(a).strip() for a in _as_list(data.get("attendees")) if _as_text(a).strip()])
     for f in ("activities", "key_points", "key_takeaways", "important_notes"):
         data[f] = [_as_text(x).strip() for x in _as_list(data.get(f)) if _as_text(x).strip()]
+    # Names that look like the same person go to the reader, not silently into
+    # the attendance list.
+    for _w in _name_warnings:
+        if _w not in data["important_notes"]:
+            data["important_notes"].append(_w)
 
     agenda = []
     for it in _as_list(data.get("agenda_items")):
