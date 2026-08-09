@@ -238,6 +238,14 @@ check("Page is honest about where documents live",
       and "that copy goes when the server sleeps" in _flat_page)
 check("The full privacy text is one tap away, not hidden",
       'id="privLink"' in page and 'id="priv"' in page)
+check("Remaining quota is at the top, not buried at the bottom",
+      'id="quotaChip"' in page and "min of recording left today" in page)
+check("A failed meeting refunds the minutes",
+      "minutes_charged" in open("app.py").read()
+      and "_refund_quota_locked(job[" in open("app.py").read())
+check("A silent recording says so instead of \"something went wrong\"",
+      "That recording has no sound in it" in open("app.py").read())
+
 check("Microphone is requested before the meeting, not during",
       "async function micCheck" in page and "Allow it now" in page)
 check("A blocked microphone is explained, not silently ignored",

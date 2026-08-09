@@ -212,9 +212,35 @@ def _worker():
             _run_job(job_id)
         except Exception as e:                       # never kill the worker
             logging.exception("job failed")
+            job = get_job(job_id)
+            # A failed meeting must not cost anyone their allowance. The
+            # minutes were taken at upload; give them back.
+            mins = int(job.get("minutes_charged") or 0)
+            if mins:
+                try:
+                    with _quota_lock:
+                        _refund_quota_locked(job["uid"], mins)
+                    logging.info("job failed: refunded %d minute(s)", mins)
+                except Exception:
+                    logging.warning("could not refund after a failed job")
+            # Our own RuntimeErrors carry a sentence written for the user.
+            # Hiding it behind "something went wrong" throws away the only
+            # useful thing we know - "no speech detected" tells them the
+            # microphone was muted; the generic text tells them nothing.
+            msg = str(e).strip()
+            human = (isinstance(e, RuntimeError) and msg
+                     and msg[0].isupper() and msg.endswith("."))
+            if isinstance(e, RuntimeError) and "No speech detected" in msg:
+                msg = ("That recording has no sound in it. The microphone was "
+                       "probably muted or blocked \u2014 nothing was charged.")
+                human = True
+            elif human:
+                msg += " Nothing was charged."
             _set(job_id, state="error",
-                 error="Something went wrong processing this meeting. "
-                       "Please try again.", detail=type(e).__name__)
+                 error=msg if human else
+                       "Something went wrong processing this meeting. "
+                       "Please try again \u2014 nothing was charged.",
+                 detail=type(e).__name__)
         finally:
             _work.task_done()
             try:
@@ -628,6 +654,7 @@ def upload():
          roster=(request.form.get("roster") or "").strip()[:1200],
          speakers=(request.form.get("speakers") == "1"),
          previous=_previous_text(request.files.get("prev")),
+         minutes_charged=(1 if is_doc else (int(dur / 60) or 1)),
          created=time.time())
     _work.put(job_id)
     mins = int(dur / 60)
@@ -932,6 +959,19 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
 margin-top:10px}
 #recMeter>i{display:block;height:100%;width:0;background:var(--blue);
 transition:width .1s linear}
+/* --- how much is left today --- */
+#quotaChip{background:var(--card2);border:1px solid var(--line);border-radius:12px;
+padding:11px 13px;margin-bottom:14px}
+#quotaChip .qtop{display:flex;justify-content:space-between;align-items:baseline;
+font-size:13px;margin-bottom:7px;gap:8px}
+#quotaLeft{color:var(--txt);font-weight:600}
+#quotaOf{color:var(--muted);font-size:12px;white-space:nowrap}
+.qbar{height:6px;background:#171b26;border-radius:6px;overflow:hidden}
+.qbar>i{display:block;height:100%;width:0;background:var(--blue);
+transition:width .5s ease}
+#quotaChip.low .qbar>i{background:#FBBF24}
+#quotaChip.out .qbar>i{background:var(--red)}
+#quotaChip.out #quotaLeft{color:#F87171}
 /* --- collapsed options --- */
 #adv{margin-top:14px;border:1px solid var(--line);border-radius:12px;
 padding:0 12px;background:var(--card2)}
@@ -999,6 +1039,10 @@ text-transform:uppercase;letter-spacing:.4px}
 </div>
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
+  <div id="quotaChip" class="hide">
+    <div class="qtop"><span id="quotaLeft"></span><span id="quotaOf"></span></div>
+    <div class="qbar"><i id="quotaFill"></i></div>
+  </div>
   <div id="recBar">
     <button type="button" class="rec big" id="recMic">
       <span class="ic">&#9679;</span>Record the room</button>
@@ -1110,7 +1154,7 @@ text-transform:uppercase;letter-spacing:.4px}
             style="width:100%;margin-top:8px">Cancel</button>
   </div>
 
-  <div class="note" id="quota"></div>
+  <div class="note hide" id="quota"></div>
 
   <div id="histWrap" class="hide">
     <label style="margin-top:18px">Your past meetings</label>
@@ -1623,7 +1667,8 @@ function watch(id){
   poll=setInterval(()=>check(id),2500); check(id);
 }
 function fail(t){clearInterval(poll);running=false;$('msg').className='msg err';$('msg').textContent=t;
-  $('barWrap').classList.add('hide');$('go').disabled=false;}
+  $('barWrap').classList.add('hide');$('go').disabled=false;
+  loadMe();}   // a failed job refunds the minutes; show that straight away
 // Closing the page used to abandon the meeting with no warning at all.
 window.addEventListener('beforeunload',e=>{
   if(!running)return;
@@ -1879,7 +1924,20 @@ function reset(){
   $('go').disabled=true; $('go').textContent='Choose a recording first';
 }
 async function loadMe(){const {j}=await api('/me');
-  if(j.signed_in)$('quota').textContent='Used '+j.used_minutes+' of '+j.daily_limit+' minutes today.';
+  if(j.signed_in){
+    // Knowing you have 12 minutes left BEFORE a two-hour meeting is the whole
+    // point. At the bottom of the page it may as well not exist.
+    var used=j.used_minutes||0, cap=j.daily_limit||0, left=Math.max(0,cap-used);
+    var chip=$('quotaChip');
+    chip.classList.remove('hide','low','out');
+    $('quotaLeft').textContent = left>0
+      ? left+' min of recording left today'
+      : 'No recording time left today';
+    $('quotaOf').textContent = used+' / '+cap+' used';
+    $('quotaFill').style.width = (cap? Math.min(100, used*100/cap) : 0)+'%';
+    if(left<=0) chip.classList.add('out');
+    else if(left<=Math.max(10, cap*0.15)) chip.classList.add('low');
+  }
   // Only offered when a key is actually configured, so nobody ticks a box
   // that silently does nothing.
   if($('spkWrap')) $('spkWrap').classList.toggle('hide', !j.speakers_available);}
