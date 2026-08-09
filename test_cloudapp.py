@@ -349,6 +349,23 @@ check("Page no longer promises server-side retention",
       "that copy goes when the server sleeps" in _flat2
       and "the server clears them when it goes to sleep" in _flat2)
 
+# The roster is the user telling us who was in the room. The hallucination
+# guard drops names the transcript never says - which used to delete a quiet
+# attendee the user had typed in themselves, silently undoing the whole feature.
+_t = "Puan Marja perlu hantar borang. Kolokium dibincangkan."
+_d = {"attendees": ["Dr. Hafizah", "Puan Marja", "Ghost Person"],
+      "action_items": [{"task": "x", "owner": "Dr. Hafizah", "deadline": ""}]}
+_kept = A.engine._drop_hallucinations(dict(_d), _t, keep=["Dr. Hafizah", "Puan Marja"])
+check("A roster name is never dropped for staying quiet",
+      "Dr. Hafizah" in _kept["attendees"])
+check("An invented attendee is still dropped",
+      "Ghost Person" not in _kept["attendees"])
+check("A roster name survives as an action owner",
+      _kept["action_items"][0]["owner"] == "Dr. Hafizah")
+_none = A.engine._drop_hallucinations(dict(_d), _t)
+check("Without a roster the guard behaves as before",
+      "Dr. Hafizah" not in _none["attendees"])
+
 # ---------------------------------------------- audio AND video formats
 # Users record on phones and in Zoom/Meet, so mp3/mp4/mkv/mov must be accepted
 # and video must have its audio extracted rather than rejected.

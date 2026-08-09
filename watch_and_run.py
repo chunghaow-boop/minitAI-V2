@@ -973,16 +973,26 @@ def _grounded(value, transcript_low):
     return hits >= max(1, (len(distinctive) + 1) // 2)
 
 
-def _drop_hallucinations(data, transcript_text):
-    """Remove attendees and action owners that never appear in the transcript."""
+def _drop_hallucinations(data, transcript_text, keep=None):
+    """Remove attendees and action owners that never appear in the transcript.
+
+    `keep` is the roster the user typed in. Those names are exempt: someone who
+    sat through a meeting without speaking is still an attendee, and deleting a
+    name the user typed themselves is a worse error than keeping one the model
+    invented. Without this, the guard silently undoes the roster.
+    """
     low = (transcript_text or "").lower()
     if not low:
         return data
+    trusted = {str(k).strip().lower() for k in (keep or []) if str(k).strip()}
     before = len(data.get("attendees") or [])
-    data["attendees"] = [a for a in (data.get("attendees") or []) if _grounded(str(a), low)]
+    data["attendees"] = [a for a in (data.get("attendees") or [])
+                         if str(a).strip().lower() in trusted or _grounded(str(a), low)]
     dropped = before - len(data["attendees"])
     for it in (data.get("action_items") or []):
-        if isinstance(it, dict) and it.get("owner") and not _grounded(str(it["owner"]), low):
+        if (isinstance(it, dict) and it.get("owner")
+                and str(it["owner"]).strip().lower() not in trusted
+                and not _grounded(str(it["owner"]), low)):
             it["owner"] = ""
             dropped += 1
     if dropped:

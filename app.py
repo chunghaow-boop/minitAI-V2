@@ -329,7 +329,9 @@ def _run_job(job_id):
                              previous=job.get("previous") or "")
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
-        data = engine._drop_hallucinations(data, text)
+        data = engine._drop_hallucinations(
+            data, text,
+            keep=[n.strip() for n in (job.get("roster") or "").splitlines() if n.strip()])
 
         _set(job_id, state="writing", progress=96)
         stamp = time.strftime("%Y-%m-%d_%H-%M")
