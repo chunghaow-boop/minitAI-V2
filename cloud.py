@@ -144,7 +144,18 @@ def _post_with_retry(url, key, *, files=None, data=None, json_body=None,
             time.sleep(delay); delay = min(delay * 2, 40)
             continue
         # 4xx that isn't auth or rate limit: our request is wrong, don't retry.
-        raise RuntimeError(f"Groq rejected the request ({r.status_code}).")
+        # Groq's own message names the problem ("must contain the word 'json'",
+        # "model decommissioned", ...). It describes the REQUEST, not the
+        # meeting, so it is safe to log - but truncate in case a model echoes
+        # input back.
+        detail = ""
+        try:
+            detail = str((r.json().get("error") or {}).get("message", ""))[:200]
+        except Exception:
+            pass
+        if detail:
+            logging.warning(f"cloud: Groq {r.status_code} - {detail}")
+        raise RuntimeError(f"Groq rejected the request ({r.status_code}). {detail}".strip())
     raise RuntimeError(f"Groq did not respond after {attempts} tries ({last}).")
 
 
@@ -225,25 +236,60 @@ def analyze(transcript_text, data_dir, system_prompt, schema):
     key = get_key(data_dir)
     if not key:
         raise RuntimeError("No Groq key configured.")
-    body = {
-        "model": pick_chat_model(data_dir),
-        "messages": [{"role": "system", "content": system_prompt},
-                     {"role": "user", "content": transcript_text}],
-        "temperature": 0.2,
-        "response_format": {"type": "json_schema",
-                            "json_schema": {"name": "minutes",
-                                            "schema": schema,
-                                            "strict": False}},
-    }
-    try:
-        r = _post_with_retry(API_ROOT + "/chat/completions", key,
-                             json_body=body, timeout=300)
-    except RuntimeError:
-        # Some models reject json_schema but accept plain json_object.
-        body["response_format"] = {"type": "json_object"}
-        r = _post_with_retry(API_ROOT + "/chat/completions", key,
-                             json_body=body, timeout=300)
+    keys = ", ".join(schema.get("required", []))
+    json_rule = ("\n\nReturn a single valid JSON object and nothing else - no "
+                 "markdown, no code fences, no commentary. The JSON object must "
+                 f"contain exactly these keys: {keys}.")
+    model = pick_chat_model(data_dir)
+
+    def _body(fmt):
+        b = {
+            "model": model,
+            # The word "json" MUST appear in the messages: OpenAI-compatible
+            # JSON modes reject the request with 400 otherwise. This is what
+            # broke the first live deploy.
+            "messages": [{"role": "system", "content": system_prompt + json_rule},
+                         {"role": "user", "content": transcript_text}],
+            "temperature": 0.2,
+        }
+        if fmt:
+            b["response_format"] = fmt
+        return b
+
+    # Three attempts, most-constrained first. Models vary in what they accept,
+    # and a hosted model can be retired without notice, so never depend on one.
+    attempts = [
+        {"type": "json_schema",
+         "json_schema": {"name": "minutes", "schema": schema, "strict": False}},
+        {"type": "json_object"},
+        None,                      # no format at all; parsed loosely below
+    ]
+    r = None
+    last = None
+    for fmt in attempts:
+        try:
+            r = _post_with_retry(API_ROOT + "/chat/completions", key,
+                                 json_body=_body(fmt), timeout=300)
+            break
+        except RuntimeError as e:
+            last = e
+            logging.info(f"cloud: response_format "
+                         f"{(fmt or {}).get('type', 'none')} not accepted")
+    if r is None:
+        raise last or RuntimeError("Groq would not accept the request.")
     raw = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
     if not raw.strip():
         raise RuntimeError("The AI returned an empty response.")
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Strip code fences / surrounding prose and take the outermost object.
+        t = raw.strip()
+        if t.startswith("```"):
+            t = t.split("```")[1] if "```" in t[3:] else t[3:]
+            if t.lstrip().lower().startswith("json"):
+                t = t.lstrip()[4:]
+        i, j = t.find("{"), t.rfind("}")
+        if i != -1 and j > i:
+            return json.loads(t[i:j + 1])
+        raise RuntimeError("The AI returned data that could not be read.")

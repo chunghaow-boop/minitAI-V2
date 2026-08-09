@@ -147,6 +147,77 @@ check("Page points confidential users to the desktop version",
       "desktop version" in page and "never uploads" in page)
 check("Page loads nothing from the internet", "http://" not in page and "https://" not in page)
 
+# ---------------------------------------------- Groq request shape
+# The first live deploy failed with HTTP 400 on BOTH json_schema and
+# json_object: OpenAI-compatible JSON modes require the literal word "json"
+# in the messages, and the rewritten system prompt had removed every mention.
+import cloud as _cl2, json as _j2
+_sent = []
+class _FakeResp:
+    status_code = 200
+    def __init__(s, body): s._b = body
+    def json(s):
+        return {"choices": [{"message": {"content": _j2.dumps({"meeting_title": "T"})}}]}
+def _cap(url, **kw):
+    _sent.append(kw.get("json") or {})
+    return _FakeResp(kw.get("json"))
+_op3 = _cl2.requests.post
+_cl2.requests.post = _cap
+_okey = _cl2.get_key
+_cl2.get_key = lambda d: "test-key"
+_cl2._chat_model = "llama-3.3-70b-versatile"
+try:
+    _cl2.analyze("Mesyuarat bermula.", "/tmp",
+                 "You write official meeting minutes.", A.engine.ANALYSIS_SCHEMA)
+    _msgs = " ".join(m["content"] for m in _sent[0]["messages"])
+    check("Groq request mentions 'json' (required by JSON mode)",
+          "json" in _msgs.lower())
+    check("Groq request names the required keys",
+          "meeting_title" in _msgs and "action_items" in _msgs)
+    check("Most-constrained response_format tried first",
+          _sent[0].get("response_format", {}).get("type") == "json_schema")
+finally:
+    _cl2.requests.post = _op3
+    _cl2.get_key = _okey
+
+# A model that rejects json_schema must be retried, not abandoned
+_calls2 = []
+def _picky(url, **kw):
+    b = kw.get("json") or {}
+    _calls2.append((b.get("response_format") or {}).get("type"))
+    if (b.get("response_format") or {}).get("type") == "json_schema":
+        class _400:
+            status_code = 400
+            def json(s): return {"error": {"message": "response_format not supported"}}
+        return _400()
+    return _FakeResp(b)
+_cl2.requests.post = _picky
+_cl2.get_key = lambda d: "test-key"
+try:
+    _cl2.analyze("Mesyuarat.", "/tmp", "Minutes.", A.engine.ANALYSIS_SCHEMA)
+    check(f"Falls back when a format is rejected ({_calls2})",
+          _calls2[0] == "json_schema" and _calls2[1] == "json_object")
+except Exception as _e:
+    check(f"Falls back when a format is rejected ({_e})", False)
+finally:
+    _cl2.requests.post = _op3
+    _cl2.get_key = _okey
+
+# Prose or code fences around the JSON must not kill the meeting
+class _Fenced:
+    status_code = 200
+    def json(s):
+        return {"choices": [{"message": {"content":
+                "Here you go:\n```json\n{\"meeting_title\": \"Ujian\"}\n```"}}]}
+_cl2.requests.post = lambda url, **kw: _Fenced()
+_cl2.get_key = lambda d: "test-key"
+try:
+    _r2 = _cl2.analyze("x", "/tmp", "y", A.engine.ANALYSIS_SCHEMA)
+    check("Code-fenced JSON is still parsed", _r2.get("meeting_title") == "Ujian")
+finally:
+    _cl2.requests.post = _op3
+    _cl2.get_key = _okey
+
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
