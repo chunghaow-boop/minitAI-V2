@@ -433,7 +433,7 @@ def _profile_path(uid):
     return os.path.join(user_dir(uid), "profile.json")
 
 
-def _save_profile(uid, name):
+def _save_profile(uid, name, org=None):
     """Remember who is using a code.
 
     Written to a disk that is wiped whenever the instance sleeps - so the
@@ -443,15 +443,18 @@ def _save_profile(uid, name):
     in use.
     """
     name = re.sub(r"\s+", " ", (name or "")).strip()[:60]
-    if not name:
+    org = re.sub(r"\s+", " ", (org or "")).strip()[:80]
+    if not name and not org:
         return
     try:
         old = {}
         if os.path.exists(_profile_path(uid)):
             old = json.load(open(_profile_path(uid)))
-        json.dump({"name": name,
+        json.dump({"name": name or old.get("name", ""),
+                   "org": org or old.get("org", ""),
                    "first_seen": old.get("first_seen") or time.time(),
-                   "last_seen": time.time()},
+                   "last_seen": time.time(),
+                   "sign_ins": int(old.get("sign_ins") or 0) + 1},
                   open(_profile_path(uid), "w"))
     except Exception as e:
         logging.warning(f"could not save a profile: {type(e).__name__}")
@@ -612,7 +615,8 @@ def login():
         time.sleep(1.0)          # slow down guessing
         return jsonify({"error": "That invite code is not valid."}), 401
     session["uid"] = _user_id_for(code)
-    _save_profile(session["uid"], (request.json or {}).get("name"))
+    _save_profile(session["uid"], (request.json or {}).get("name"),
+                  (request.json or {}).get("org"))
     session.permanent = True
     return jsonify({"ok": True})
 
@@ -945,7 +949,10 @@ def admin_stats():
                 "masked": (c.split("-")[0] + "-****" if "-" in c else c[:3] + "***"),
                 "used": bool(_load_profile(_user_id_for(c))),
                 "name": _load_profile(_user_id_for(c)).get("name", ""),
+                "org": _load_profile(_user_id_for(c)).get("org", ""),
+                "first_seen": _load_profile(_user_id_for(c)).get("first_seen", 0),
                 "last_seen": _load_profile(_user_id_for(c)).get("last_seen", 0),
+                "sign_ins": _load_profile(_user_id_for(c)).get("sign_ins", 0),
              } for c in _invite_codes()],
             key=lambda x: (not x["used"], x["label"])),
         "invite_codes_configured": len(_invite_codes()),
@@ -1248,6 +1255,8 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
   <label for="who">Your name</label>
   <input id="who" autocomplete="name" placeholder="e.g. Dr. Hafizah" maxlength="60">
+  <label for="org">Where you are from</label>
+  <input id="org" placeholder="e.g. FSSK, UMS" maxlength="80">
   <label for="code">Invite code</label>
   <input id="code" type="password" autocomplete="one-time-code" placeholder="Enter your invite code">
   <button id="loginBtn">Sign in</button>
@@ -1492,7 +1501,8 @@ $('loginBtn').onclick=async()=>{
   const code=$('code').value.trim(); if(!code)return;
   $('loginBtn').disabled=true;
   const {ok,j}=await api('/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({code, name:($('who')||{}).value||''})});
+    body:JSON.stringify({code, name:($('who')||{}).value||'',
+      org:($('org')||{}).value||''})});
   $('loginBtn').disabled=false;
   if(ok){$('loginMsg').classList.add('hide');$('loginMsg').textContent='';
     $('loginCard').classList.add('hide');$('appCard').classList.remove('hide');loadMe();resume();}
@@ -1903,10 +1913,12 @@ try{ micCheck(); }catch(e){}
 // The server's disk is wiped when it sleeps, so the browser re-asserts the
 // name on every sign-in and the record repairs itself.
 try{
-  var _n=localStorage.getItem('minitai.name');
-  if(_n && $('who')) $('who').value=_n;
-  if($('who')) $('who').addEventListener('blur',function(){
-    try{ localStorage.setItem('minitai.name',$('who').value); }catch(e){}
+  [['who','minitai.name'],['org','minitai.org']].forEach(function(p){
+    var v=localStorage.getItem(p[1]);
+    if(v && $(p[0])) $(p[0]).value=v;
+    if($(p[0])) $(p[0]).addEventListener('blur',function(){
+      try{ localStorage.setItem(p[1], $(p[0]).value); }catch(e){}
+    });
   });
 }catch(e){}
 try{ setTimeout(driveReconnect, 1200); }catch(e){}
@@ -1942,9 +1954,21 @@ $('adminBtn').onclick=async function(){
       +jb.failed+' failed</div></div>'
       +'<div class="row"><b>Invite codes</b>'
       + (j.codes||[]).map(function(c){
+          var who = c.name || '';
+          if(c.org) who += (who ? ' \u00b7 ' : '') + c.org;
+          var when = c.first_seen
+            ? new Date(c.first_seen*1000).toLocaleDateString() : '';
+          var seen = c.last_seen
+            ? new Date(c.last_seen*1000).toLocaleString([], {dateStyle:'short',
+                                                            timeStyle:'short'}) : '';
           return '<div class="n">' + (c.used ? '\u25CF ' : '\u25CB ')
             + esc(c.masked) + ' \u2014 '
-            + (c.used ? esc(c.name || 'used, no name given') : 'never used')
+            + (c.used
+                ? esc(who || 'used, no name given')
+                  + (when ? '<br><span style="opacity:.7">joined ' + esc(when)
+                            + ' \u00b7 last seen ' + esc(seen)
+                            + ' \u00b7 ' + (c.sign_ins||0) + ' sign-ins</span>' : '')
+                : 'never used')
             + '</div>';
         }).join('')
       +'</div>'
