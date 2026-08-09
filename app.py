@@ -86,6 +86,14 @@ if not _SECRET:
     _SECRET = secrets.token_hex(32)
     logging.warning("MINITAI_SECRET is not set - logins reset on every restart")
 app.secret_key = _SECRET
+# The site is served over HTTPS by the host. Marking the cookie secure stops a
+# stray http:// link ever putting someone's session on the wire in clear, and
+# HttpOnly keeps it out of reach of any script that manages to run on the page.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("MINITAI_INSECURE_COOKIES") != "1",
+)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -288,6 +296,33 @@ def _quota_path(uid):
     return os.path.join(user_dir(uid), "quota.json")
 
 
+# Every invited person shares ONE free Groq account. Twenty people each
+# allowed 240 minutes is 4,800 minutes a day against a free tier worth roughly
+# 480 - so without this the account dies mid-afternoon and everyone's meeting
+# fails halfway through with a rate-limit error. Refuse politely at the door
+# instead, while there is still a whole allowance left tomorrow.
+SERVICE_DAILY_MINUTES = int(os.environ.get("MINITAI_SERVICE_DAILY_MINUTES", "400"))
+_SERVICE_QUOTA = os.path.join(DATA_ROOT, "service_quota.json")
+
+
+def _service_quota_locked(minutes):
+    today = time.strftime("%Y-%m-%d")
+    try:
+        d = json.load(open(_SERVICE_QUOTA))
+    except Exception:
+        d = {}
+    if d.get("day") != today:
+        d = {"day": today, "minutes": 0}
+    if d["minutes"] + minutes > SERVICE_DAILY_MINUTES:
+        return False, d["minutes"]
+    d["minutes"] += minutes
+    try:
+        json.dump(d, open(_SERVICE_QUOTA, "w"))
+    except OSError:
+        pass
+    return True, d["minutes"]
+
+
 _quota_lock = threading.Lock()
 
 
@@ -295,7 +330,25 @@ def check_and_add_quota(uid, minutes):
     """Serialised: gunicorn runs 8 request threads, so two simultaneous uploads
     could otherwise both read the old total and one would overwrite the other."""
     with _quota_lock:
-        return _check_and_add_quota_locked(uid, minutes)
+        ok, used = _check_and_add_quota_locked(uid, minutes)
+        if not ok:
+            return False, used
+        svc_ok, _svc = _service_quota_locked(minutes)
+        if not svc_ok:
+            _refund_quota_locked(uid, minutes)
+            return "service", used
+        return True, used
+
+
+def _refund_quota_locked(uid, minutes):
+    """Give the minutes back when the upload is refused after being charged."""
+    p = _quota_path(uid)
+    try:
+        d = json.load(open(p))
+        d["minutes"] = max(0, d.get("minutes", 0) - minutes)
+        json.dump(d, open(p, "w"))
+    except Exception:
+        pass
 
 
 def _check_and_add_quota_locked(uid, minutes):
@@ -452,6 +505,13 @@ def upload():
             f"minutes for each half will still be complete."}), 413
 
     ok, used = check_and_add_quota(uid, 1 if is_doc else (int(dur / 60) or 1))
+    if ok == "service":
+        os.remove(path)
+        return jsonify({"error":
+            "MinitAI has used up today's free transcription allowance, which "
+            "everyone here shares. It resets after midnight. Your own minutes "
+            "have not been touched - please try again tomorrow, or use the "
+            "desktop version, which has no limit."}), 429
     if not ok:
         os.remove(path)
         return jsonify({"error": f"You have used {used} of your "
@@ -498,7 +558,54 @@ def job_status(job_id):
                                  "allowance twice."}), 410
     if j.get("uid") != uid:               # never confirm another user's job
         return jsonify({"error": "Not found"}), 404
-    return jsonify({k: v for k, v in j.items() if k not in ("uid", "audio")})
+    out = {k: v for k, v in j.items() if k not in ("uid", "audio")}
+    if out.get("state") == "queued":
+        # One meeting is processed at a time. Saying "third in line" is the
+        # difference between waiting patiently and assuming it has hung.
+        with _jobs_lock:
+            ahead = sum(1 for k, v in JOBS.items()
+                        if v.get("state") == "queued"
+                        and v.get("created", 0) < j.get("created", 0))
+        out["ahead"] = ahead
+    return jsonify(out)
+
+
+@app.route("/recent")
+def recent():
+    """Everything this user could still be waiting for or still collect.
+
+    Without this, pressing refresh - or the phone locking the screen, or a
+    tab being closed - silently destroyed the meeting: the job carried on
+    server-side, finished, and nobody ever received the documents, while the
+    minutes had already been deducted. Recovery has to come from the server,
+    because the browser forgets everything on reload.
+    """
+    uid = require_user()
+    with _jobs_lock:
+        mine = [dict(v, id=k) for k, v in JOBS.items() if v.get("uid") == uid]
+    mine.sort(key=lambda j: j.get("created", 0), reverse=True)
+    active, finished = [], []
+    for j in mine[:20]:
+        row = {"id": j["id"], "state": j.get("state"),
+               "progress": j.get("progress", 0), "title": j.get("title", ""),
+               "created": j.get("created", 0)}
+        (finished if j.get("state") in ("done", "error") else active).append(row)
+
+    # Files still physically present. Survives the process restarting, which
+    # in-memory jobs do not.
+    out = user_dir(uid, "out")
+    files = []
+    try:
+        for name in os.listdir(out):
+            p = os.path.join(out, name)
+            if os.path.isfile(p):
+                files.append({"name": name, "when": os.path.getmtime(p),
+                              "url": "/get/" + make_token(uid, name)})
+    except OSError:
+        pass
+    files.sort(key=lambda f: f["when"], reverse=True)
+    return jsonify({"active": active, "finished": finished,
+                    "files": files[:12]})
 
 
 @app.route("/get/<token>")
@@ -618,6 +725,14 @@ a.file:hover{border-color:var(--blue)}
   <div class="msg" id="msg"></div>
   <div id="files"></div>
   <div class="note" id="quota"></div>
+  <div id="recentWrap" class="hide">
+    <label style="margin-top:18px">Recent documents</label>
+    <div class="note" style="margin:0 0 6px">Still here if you closed the page
+      or refreshed by accident. Cleared automatically after {{ retention }} hours.</div>
+    <div id="recent"></div>
+  </div>
+  <div class="note" style="text-align:right">
+    <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
   <div class="note">Your audio is sent to an AI service to be processed, then
     deleted. Your documents are handed straight to your browser and are not
     stored on the server, so save them somewhere you will find them again.
@@ -626,7 +741,7 @@ a.file:hover{border-color:var(--blue)}
 </div>
 <script>
 const $=i=>document.getElementById(i);
-let file=null, poll=null;
+let file=null, poll=null, running=false;
 
 async function api(u,o){const r=await fetch(u,o);let j={};try{j=await r.json()}catch(e){}
   return {ok:r.ok,status:r.status,j};}
@@ -637,7 +752,8 @@ $('loginBtn').onclick=async()=>{
   const {ok,j}=await api('/login',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({code})});
   $('loginBtn').disabled=false;
-  if(ok){$('loginCard').classList.add('hide');$('appCard').classList.remove('hide');loadMe();}
+  if(ok){$('loginMsg').classList.add('hide');$('loginMsg').textContent='';
+    $('loginCard').classList.add('hide');$('appCard').classList.remove('hide');loadMe();resume();}
   else{$('loginMsg').textContent=j.error||'Sign in failed.';$('loginMsg').classList.remove('hide');}
 };
 $('code').addEventListener('keydown',e=>{if(e.key==='Enter')$('loginBtn').click();});
@@ -649,10 +765,13 @@ $('drop').ondrop=e=>{e.preventDefault();$('drop').classList.remove('on');pick(e.
 $('file').onchange=e=>pick(e.target.files[0]);
 function pick(f){if(!f)return;file=f;
   $('drop').innerHTML=f.name+'<br><span style="font-size:12px">'+(f.size/1048576).toFixed(1)+' MB</span>';
+  // Choosing a file while one is still running must NOT re-arm the button;
+  // starting a second job would orphan the first one's progress.
+  if(running){$('go').textContent='Still working on the last one\\u2026';return;}
   $('go').disabled=false;$('go').textContent='Make the minutes';}
 
 $('go').onclick=async()=>{
-  if(!file)return;
+  if(!file||running)return;
   $('go').disabled=true;$('files').innerHTML='';
   $('msg').className='msg';$('msg').textContent='Uploading\\u2026';
   $('barWrap').classList.remove('hide');$('bar').style.width='4%';
@@ -665,21 +784,34 @@ $('go').onclick=async()=>{
   $('msg').textContent=j.queued_ahead>0
     ? 'Waiting \\u2014 '+j.queued_ahead+' meeting(s) ahead of yours\\u2026'
     : 'Processing\\u2026 about '+Math.max(1,Math.round(j.minutes/4))+' min';
-  poll=setInterval(()=>check(j.job),2500);
+  watch(j.job);
 };
-function fail(t){clearInterval(poll);$('msg').className='msg err';$('msg').textContent=t;
+// One place that starts polling, so resuming after a refresh behaves exactly
+// like the original upload.
+function watch(id){
+  running=true; clearInterval(poll);
+  $('go').disabled=true; $('barWrap').classList.remove('hide');
+  poll=setInterval(()=>check(id),2500); check(id);
+}
+function fail(t){clearInterval(poll);running=false;$('msg').className='msg err';$('msg').textContent=t;
   $('barWrap').classList.add('hide');$('go').disabled=false;}
+// Closing the page used to abandon the meeting with no warning at all.
+window.addEventListener('beforeunload',e=>{
+  if(!running)return;
+  e.preventDefault(); e.returnValue='';
+});
 
 const NICE={queued:'Waiting in the queue\\u2026',transcribing:'Listening to the recording\\u2026',
   summarising:'Writing the summary\\u2026',writing:'Building your documents\\u2026'};
-async function check(id){
+async function check(id,noAuto){
   const {ok,j,status}=await api('/job/'+id);
   if(status===410){fail(j.error||'That job was lost. Please upload again.');return;}
   if(!ok){fail('Lost track of that job. Please try again.');return;}
   if(j.progress!=null)$('bar').style.width=Math.max(4,j.progress)+'%';
   if(j.state==='error'){fail(j.error||'Something went wrong.');return;}
   if(j.state==='done'){
-    clearInterval(poll);
+    clearInterval(poll); running=false;
+    $('barWrap').classList.add('hide');
     $('msg').className='msg ok';
     $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
     const L={docx:'Word document (.docx)',pptx:'Slides (.pptx)',transcript:'Full transcript (.txt)'};
@@ -687,6 +819,7 @@ async function check(id){
                 pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
                 transcript:'text/plain'};
     $('files').innerHTML='';
+    let first=null;
     Object.entries(j.files||{}).forEach(([k,v])=>{
       const a=document.createElement('a');
       a.className='file'; a.download=v.name; a.textContent='Download '+L[k];
@@ -695,26 +828,61 @@ async function check(id){
         const bin=atob(v.data); const buf=new Uint8Array(bin.length);
         for(let i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
         a.href=URL.createObjectURL(new Blob([buf],{type:MIME[k]||'application/octet-stream'}));
+        if(k==='docx')first=a;
       } else { a.href=v.url; }
       $('files').appendChild(a);
     });
     $('files').insertAdjacentHTML('beforeend',
-      '<div class="note">Saved to your downloads automatically. '
-      +'These files are not kept on the server.</div>');
-    // Save immediately - the user may not click for another hour, by which
-    // time a free instance has slept and cleared everything.
-    Object.entries(j.files||{}).forEach(([k,v],i)=>{
-      if(!v.data)return;
-      const a=$('files').children[i];
-      setTimeout(()=>{try{a.click();}catch(e){}}, 300*(i+1));
-    });
-    $('go').disabled=false;loadMe();return;
+      '<div class="note">The minutes save to your downloads automatically. '
+      +'Tap the other two if you want them as well.</div>');
+    // Only ONE automatic download. Browsers challenge the second and third
+    // with a "allow multiple downloads?" prompt that people dismiss, and the
+    // files were then lost. The rest stay one tap away, and Recent documents
+    // below survives a refresh.
+    if(first&&!noAuto)setTimeout(()=>{try{first.click();}catch(e){}},400);
+    reset(); loadMe(); loadRecent(); return;
   }
+  if(j.state==='queued'&&j.ahead>0){
+    $('msg').textContent=j.ahead===1?'Next in line \\u2014 one meeting ahead of yours\\u2026'
+      :'Waiting \\u2014 '+j.ahead+' meetings ahead of yours\\u2026'; return;}
   $('msg').textContent=NICE[j.state]||'Working\\u2026';
+}
+// Back to a clean form, so nobody re-uploads the same meeting by accident and
+// pays for it twice.
+function reset(){
+  file=null; $('file').value='';
+  $('drop').innerHTML='Tap to choose another file &mdash; or drop it here';
+  $('go').disabled=true; $('go').textContent='Choose a recording first';
 }
 async function loadMe(){const {j}=await api('/me');
   if(j.signed_in)$('quota').textContent='Used '+j.used_minutes+' of '+j.daily_limit+' minutes today.';}
-if(!$('appCard').classList.contains('hide'))loadMe();
+
+async function loadRecent(){
+  const {ok,j}=await api('/recent'); if(!ok||!j)return;
+  const f=j.files||[];
+  $('recentWrap').classList.toggle('hide',f.length===0);
+  $('recent').innerHTML=f.map(x=>'<a class="file" href="'+x.url+'">'+x.name+'</a>').join('');
+}
+
+// Picking up where the page left off. A refresh, a closed tab, a phone that
+// locked itself - the job is still running on the server, so re-attach to it
+// instead of showing an empty form and losing the meeting.
+async function resume(){
+  const {ok,j}=await api('/recent'); if(!ok||!j)return;
+  loadRecent();
+  const a=(j.active||[])[0];
+  if(a){
+    $('msg').className='msg';
+    $('msg').textContent='Picking up where you left off\\u2026';
+    watch(a.id); return;
+  }
+  const d=(j.finished||[]).filter(x=>x.state==='done')[0];
+  if(d){ check(d.id,true); }   // re-offers the links, no repeat download
+}
+$('signout').onclick=async e=>{e.preventDefault();
+  if(running&&!confirm('A meeting is still being processed. Sign out anyway?'))return;
+  running=false; await api('/logout',{method:'POST'}); location.reload();};
+if(!$('appCard').classList.contains('hide')){loadMe();resume();}
 </script></div></body></html>"""
 
 
