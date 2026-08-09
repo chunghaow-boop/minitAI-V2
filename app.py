@@ -928,8 +928,8 @@ padding:0 12px;background:var(--card2)}
 #adv>summary{cursor:pointer;padding:13px 0;font-size:13px;color:var(--muted);
 list-style:none}
 #adv>summary::-webkit-details-marker{display:none}
-#adv>summary::after{content:' \25BE';float:right}
-#adv[open]>summary::after{content:' \25B4'}
+#adv>summary::after{content:'\u00a0\u25be';float:right}
+#adv[open]>summary::after{content:'\u00a0\u25b4'}
 /* --- what you actually got --- */
 #preview{background:var(--card2);border:1px solid var(--line);border-radius:12px;
 padding:14px;margin-top:12px}
