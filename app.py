@@ -58,6 +58,9 @@ os.makedirs(DATA_ROOT, exist_ok=True)
 RETENTION_HOURS = int(os.environ.get("MINITAI_RETENTION_HOURS", "24"))
 MAX_UPLOAD_MB = int(os.environ.get("MINITAI_MAX_UPLOAD_MB", "300"))
 MAX_MINUTES_PER_USER_PER_DAY = int(os.environ.get("MINITAI_DAILY_MINUTES", "240"))
+# Documents are returned inside the job result up to this total size, so the
+# user still gets them after the free instance sleeps and clears its disk.
+INLINE_LIMIT_BYTES = int(os.environ.get("MINITAI_INLINE_LIMIT_MB", "8")) * 1024 * 1024
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
@@ -201,9 +204,21 @@ def _run_job(job_id):
         with open(txt, "w", encoding="utf-8") as f:
             f.write(text)
 
-        files = {k: {"name": os.path.basename(p),
-                     "url": "/get/" + make_token(uid, os.path.basename(p))}
-                 for k, p in (("docx", docx), ("pptx", pptx), ("transcript", txt))}
+        files = {}
+        inline_budget = INLINE_LIMIT_BYTES
+        for k, p in (("docx", docx), ("pptx", pptx), ("transcript", txt)):
+            name = os.path.basename(p)
+            entry = {"name": name,
+                     "url": "/get/" + make_token(uid, name)}
+            try:
+                size = os.path.getsize(p)
+                if size <= inline_budget:
+                    with open(p, "rb") as fh:
+                        entry["data"] = base64.b64encode(fh.read()).decode()
+                    inline_budget -= size
+            except OSError:
+                pass
+            files[k] = entry
         _set(job_id, state="done", progress=100, files=files,
              title=data.get("meeting_title", ""), minutes=int((dur or 0) / 60))
     finally:
@@ -391,7 +406,11 @@ def get_file(token):
         return "Not yours", 403
     full = os.path.join(user_dir(uid, "out"), os.path.basename(filename))
     if not os.path.exists(full):
-        return "That file has expired and been deleted.", 404
+        return ("This link has expired. The free server clears its storage when "
+                "it goes to sleep, so finished documents do not live here for "
+                "long. Please upload the recording again - it only takes a "
+                "minute, and your browser downloads the files immediately when "
+                "they are ready."), 404
     return send_file(full, as_attachment=True)
 
 
@@ -447,7 +466,8 @@ a.file:hover{border-color:var(--blue)}
 
 <div class="card {{ '' if signed_in else 'hide' }}" id="appCard">
   <div id="drop">Tap to choose a recording &mdash; or drop it here<br>
-    <span style="font-size:12px">Phone voice memos work too</span></div>
+    <span style="font-size:12px">Audio or video &mdash; mp3, mp4, m4a, wav, mov,
+    mkv, phone voice memos. Video has its audio pulled out automatically.</span></div>
   <input id="file" type="file" accept="audio/*,video/*" class="hide">
 
   <label for="lang">Language spoken in the meeting</label>
@@ -468,9 +488,10 @@ a.file:hover{border-color:var(--blue)}
   <div id="files"></div>
   <div class="note" id="quota"></div>
   <div class="note">Your audio is sent to an AI service to be processed, then
-    deleted. Finished documents are removed after {{ retention }} hours &mdash;
-    download them. For confidential meetings, use the desktop version, which
-    never uploads anything.</div>
+    deleted. Your documents are handed straight to your browser and are not
+    stored on the server, so save them somewhere you will find them again.
+    For confidential meetings, use the desktop version, which never uploads
+    anything.</div>
 </div>
 <script>
 const $=i=>document.getElementById(i);
@@ -528,8 +549,31 @@ async function check(id){
     $('msg').className='msg ok';
     $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
     const L={docx:'Word document (.docx)',pptx:'Slides (.pptx)',transcript:'Full transcript (.txt)'};
-    $('files').innerHTML=Object.entries(j.files||{}).map(
-      ([k,v])=>'<a class="file" href="'+v.url+'">Download '+L[k]+'</a>').join('');
+    const MIME={docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                transcript:'text/plain'};
+    $('files').innerHTML='';
+    Object.entries(j.files||{}).forEach(([k,v])=>{
+      const a=document.createElement('a');
+      a.className='file'; a.download=v.name; a.textContent='Download '+L[k];
+      if(v.data){
+        // Held in the browser, not on the server. Survives the server sleeping.
+        const bin=atob(v.data); const buf=new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
+        a.href=URL.createObjectURL(new Blob([buf],{type:MIME[k]||'application/octet-stream'}));
+      } else { a.href=v.url; }
+      $('files').appendChild(a);
+    });
+    $('files').insertAdjacentHTML('beforeend',
+      '<div class="note">Saved to your downloads automatically. '
+      +'These files are not kept on the server.</div>');
+    // Save immediately - the user may not click for another hour, by which
+    // time a free instance has slept and cleared everything.
+    Object.entries(j.files||{}).forEach(([k,v],i)=>{
+      if(!v.data)return;
+      const a=$('files').children[i];
+      setTimeout(()=>{try{a.click();}catch(e){}}, 300*(i+1));
+    });
     $('go').disabled=false;loadMe();return;
   }
   $('msg').textContent=NICE[j.state]||'Working\\u2026';

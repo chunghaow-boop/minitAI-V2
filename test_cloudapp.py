@@ -142,7 +142,8 @@ check("Health endpoint leaks no secrets",
 # ------------------------------------------------------------ page content
 page = h.data.decode()
 check("Page states audio is uploaded", "sent to an AI service" in page)
-check("Page states files are deleted", "removed after" in page)
+check("Page is honest about where documents live",
+      "not\n    stored on the server" in page or "not stored on the server" in " ".join(page.split()))
 check("Page points confidential users to the desktop version",
       "desktop version" in page and "never uploads" in page)
 check("Page loads nothing from the internet", "http://" not in page and "https://" not in page)
@@ -217,6 +218,40 @@ try:
 finally:
     _cl2.requests.post = _op3
     _cl2.get_key = _okey
+
+# ------------------------------- documents must not depend on server disk
+# A real download failed with "expired and been deleted" 16 minutes after a
+# successful run: the free instance slept and wiped /tmp. Documents are now
+# returned inline so the browser holds them.
+check("Job results carry the files inline", "b64encode" in open("app.py").read())
+check("There is a size cap on inline delivery", "INLINE_LIMIT_BYTES" in open("app.py").read())
+_page2 = client().get("/").data.decode()
+check("Page builds downloads from inline bytes", "createObjectURL" in _page2)
+check("Page saves the files automatically", "a.click()" in _page2)
+check("Page still falls back to the server link", "a.href=v.url" in _page2)
+check("Expired-link message explains the real cause and the fix",
+      "goes to sleep" in open("app.py").read()
+      and "upload the recording again" in open("app.py").read())
+check("Page no longer promises server-side retention",
+      "not stored on the server" in " ".join(_page2.split()))
+
+# ---------------------------------------------- audio AND video formats
+# Users record on phones and in Zoom/Meet, so mp3/mp4/mkv/mov must be accepted
+# and video must have its audio extracted rather than rejected.
+for _ext in (".mp3", ".mp4", ".m4a", ".mkv", ".mov", ".webm", ".wav",
+             ".opus", ".amr", ".3gp", ".aac", ".flac", ".ogg"):
+    check(f"Accepts {_ext}", _ext in A.engine.AUDIO_EXTS)
+check("Upload widget offers audio and video", 'accept="audio/*,video/*"' in _page2)
+# ffmpeg must strip the video stream, not choke on it
+import inspect as _insp
+_flac_src = _insp.getsource(_cl2._to_flac)
+check("Video is converted audio-only (-vn)", '"-vn"' in _flac_src)
+check("Converted to 16kHz mono for transcription",
+      '"16000"' in _flac_src and '"-ac", "1"' in _flac_src)
+_vid = a.post("/upload", data={"audio": (io.BytesIO(b"x" * 4000), "meeting.mp4")},
+              content_type="multipart/form-data")
+check(f"An .mp4 upload is not rejected as wrong type ({_vid.status_code})",
+      _vid.status_code != 400 or "Unsupported" not in str(_vid.get_json()))
 
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
