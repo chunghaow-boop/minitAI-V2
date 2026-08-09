@@ -233,7 +233,7 @@ def _to_flac(src, dst, ffmpeg_exe, start=None, length=None):
 
 
 def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
-               prompt=None, duration=None, progress=None):
+               prompt=None, duration=None, progress=None, segments_out=None):
     """Transcribe via Groq. Raises on failure so the caller can fall back."""
     key = get_key(data_dir)
     if not key:
@@ -247,7 +247,7 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
             n = int(duration // CLOUD_SEGMENT_SECONDS) + 1
             spans = [(i * CLOUD_SEGMENT_SECONDS, CLOUD_SEGMENT_SECONDS)
                      for i in range(n)]
-        parts, failed = [], []
+        parts, failed, stamps = [], [], []
         for i, (start, length) in enumerate(spans, 1):
             if progress:
                 try:
@@ -262,7 +262,11 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
                 failed.append(i)
                 logging.warning(f"cloud: part {i} is too large to upload")
                 continue
-            fields = {"model": (None, STT_MODEL), "response_format": (None, "json")}
+            # verbose_json costs nothing extra and returns segment timings, so
+            # a reader can find the moment a line came from instead of taking
+            # the transcript on trust.
+            fields = {"model": (None, STT_MODEL),
+                      "response_format": (None, "verbose_json")}
             if language:
                 fields["language"] = (None, language)
             if prompt:
@@ -271,7 +275,13 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
                 fields["file"] = (os.path.basename(piece), fh, "audio/flac")
                 r = _post_with_retry(API_ROOT + "/audio/transcriptions", key,
                                      files=fields, timeout=600)
-            parts.append((r.json().get("text") or "").strip())
+            body = r.json()
+            offset = float(start or 0)
+            for seg in (body.get("segments") or []):
+                txt = (seg.get("text") or "").strip()
+                if txt:
+                    stamps.append((offset + float(seg.get("start") or 0), txt))
+            parts.append((body.get("text") or "").strip())
             try:
                 os.remove(piece)
             except OSError:
@@ -280,6 +290,8 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
         if failed and len(failed) * 2 >= len(spans):
             raise RuntimeError("Most of the recording could not be uploaded.")
         text = " ".join(p for p in parts if p)
+        if segments_out is not None:
+            segments_out.extend(stamps)
         if not text.strip():
             raise RuntimeError("No speech detected in audio.")
         return text
@@ -418,7 +430,7 @@ def _find_missing(transcript_text, draft, data_dir, schema):
 
 
 def analyze(transcript_text, data_dir, system_prompt, schema,
-            style=DEFAULT_STYLE, completeness_check=True, focus=""):
+            style=DEFAULT_STYLE, completeness_check=True, focus="", roster=""):
     """Summarise a transcript.
 
     Long transcripts are summarised in sections and merged, then checked once
@@ -437,6 +449,18 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
                     "include and what to leave out. If the meeting simply did "
                     "not cover it, say nothing about it rather than inventing "
                     "content - the no-invention rule still outranks this.")
+
+    names = [n.strip() for n in (roster or "").splitlines() if n.strip()]
+    if names:
+        # A roster the user typed is ground truth. It beats whatever the
+        # transcript garbled, and it is the difference between an attendance
+        # list and a list of everyone whose name was said out loud.
+        sys_p += ("\n\nWHO WAS PRESENT (given by the user, authoritative):\n"
+                  + "; ".join(names[:60])
+                  + "\n\nUse exactly these spellings for these people wherever "
+                    "they appear. Put exactly these names in attendees - do not "
+                    "add anyone who was merely mentioned, and do not drop anyone "
+                    "on this list.")
 
     text = transcript_text or ""
     if len(text) <= MAP_REDUCE_OVER_CHARS:
@@ -468,7 +492,96 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
                     added += len(extra)
             if added:
                 logging.info(f"cloud: completeness pass added {added} missed item(s)")
+                # The completeness pass appends without looking at what is
+                # already there, so it can put back a topic the merge just
+                # folded. Fold again. This is why one real meeting still showed
+                # "Kolokium Pascasiswazah" and "Pembentangan Kolokium".
+                import watch_and_run as _engine
+                before = len(data.get("agenda_items") or [])
+                data["agenda_items"] = _engine._merge_agenda(data.get("agenda_items") or [])
+                data["action_items"] = _engine._merge_actions(data.get("action_items") or [])
+                if len(data["agenda_items"]) < before:
+                    logging.info(f"cloud: re-folded {before - len(data['agenda_items'])} "
+                                 f"duplicate topic(s) after the completeness pass")
         except Exception as e:
             # A failed check must never cost the user their minutes.
             logging.info(f"cloud: completeness check skipped ({type(e).__name__})")
+
+    # Word-matching cannot tell that "Kelas RMC" and "Pembentangan RMC" are one
+    # subject or two. When a meeting still looks over-fragmented, ask the model
+    # once - text only, so it barely touches the free tier - and accept the
+    # answer only if it is strictly a folding of what we already had.
+    if names:
+        data["attendees"] = names
+    if len(data.get("agenda_items") or []) > CONSOLIDATE_OVER_ITEMS:
+        try:
+            data = _consolidate(data, data_dir)
+        except Exception as e:
+            logging.info(f"cloud: consolidation skipped ({type(e).__name__})")
     return data
+
+
+CONSOLIDATE_OVER_ITEMS = int(os.environ.get("MINITAI_CONSOLIDATE_OVER", "10"))
+
+
+def _consolidate(data, data_dir):
+    """Fold agenda items that are the same subject worded differently.
+
+    Deliberately conservative: the model may only merge, never rewrite. Any
+    reply that invents a topic, or that collapses the meeting to almost
+    nothing, is thrown away and the original kept.
+    """
+    import json as _j
+    items = data.get("agenda_items") or []
+    listing = [{"i": n, "topic": it.get("topic", "")} for n, it in enumerate(items)]
+    sys_p = (
+        "You are tidying the agenda of a Malaysian meeting's minutes. You get a "
+        "numbered list of agenda topics, some of which describe the SAME subject "
+        "in different words because the meeting was summarised in sections.\n"
+        "Return JSON: {\"groups\": [[0,3],[1],[2,4,5]]} - each group holds the "
+        "indexes of entries that are the same subject. Every index must appear "
+        "exactly once. Do NOT merge topics that are merely related; only merge "
+        "ones a reader would call duplicates. If nothing is duplicated, return "
+        "each index in its own group.")
+    schema = {"type": "object",
+              "properties": {"groups": {"type": "array", "items": {
+                  "type": "array", "items": {"type": "integer"}}}},
+              "required": ["groups"]}
+    reply = _one_pass(_j.dumps(listing, ensure_ascii=False), data_dir, sys_p, schema)
+    groups = reply.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return data
+    seen, merged = set(), []
+    for g in groups:
+        idx = [i for i in g if isinstance(i, int) and 0 <= i < len(items) and i not in seen]
+        if not idx:
+            continue
+        seen.update(idx)
+        merged.append(_fold([items[i] for i in idx]))
+    # Anything the model forgot to mention keeps its place rather than vanishing.
+    for i, it in enumerate(items):
+        if i not in seen:
+            merged.append(it)
+    if len(merged) < max(1, len(items) // 3):
+        logging.warning("cloud: consolidation collapsed too much, keeping original")
+        return data
+    if len(merged) < len(items):
+        logging.info(f"cloud: consolidation folded {len(items) - len(merged)} topic(s)")
+    data["agenda_items"] = merged
+    return data
+
+
+def _fold(group):
+    """One agenda entry from several describing the same subject."""
+    import watch_and_run as _engine
+    keep = dict(group[0])
+    for other in group[1:]:
+        if len(other.get("discussion", "")) > len(keep.get("discussion", "")):
+            keep["discussion"] = other["discussion"]
+        dec = other.get("decision", "")
+        if _engine._real_decision(dec):
+            if not _engine._real_decision(keep.get("decision", "")):
+                keep["decision"] = dec
+            elif dec.lower() not in keep["decision"].lower():
+                keep["decision"] = keep["decision"].rstrip(".") + "; " + dec
+    return keep

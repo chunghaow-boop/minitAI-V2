@@ -223,10 +223,48 @@ def _worker():
                 pass
 
 
+def _seed(job):
+    """What the transcriber is told to expect: the hint words and the roster.
+
+    Correcting a name here, before transcription, works far better than trying
+    to repair it afterwards - the decoder simply picks the spelling it was
+    given.
+    """
+    bits = [(job.get("hints") or "").strip()]
+    roster = (job.get("roster") or "").strip()
+    if roster:
+        bits.append(", ".join(x.strip() for x in roster.splitlines() if x.strip()))
+    return ", ".join(b for b in bits if b)[:800]
+
+
+def _package(uid, pairs):
+    """Turn generated files into the payload the browser downloads from.
+
+    Small files travel inline as base64 so they survive the server sleeping;
+    the signed URL is the fallback for anything too big to inline.
+    """
+    files = {}
+    inline_budget = INLINE_LIMIT_BYTES
+    for k, p in pairs:
+        name = os.path.basename(p)
+        entry = {"name": name, "url": "/get/" + make_token(uid, name)}
+        try:
+            size = os.path.getsize(p)
+            if size <= inline_budget:
+                with open(p, "rb") as fh:
+                    entry["data"] = base64.b64encode(fh.read()).decode()
+                inline_budget -= size
+        except OSError:
+            pass
+        files[k] = entry
+    return files
+
+
 def _run_job(job_id):
     job = get_job(job_id)
     uid, audio_path = job["uid"], job["audio"]
     out = user_dir(uid, "out")
+    segments = []          # timings, when the source was audio rather than a document
     try:
         if job.get("kind") == "doc":
             _set(job_id, state="reading", progress=30)
@@ -241,13 +279,15 @@ def _run_job(job_id):
 
             text = cloud.transcribe(audio_path, DATA_ROOT, engine._ffmpeg_exe(),
                                     language=job.get("lang") or None,
-                                    prompt=job.get("hints") or None,
-                                    duration=dur, progress=prog)
+                                    prompt=_seed(job) or None,
+                                    duration=dur, progress=prog,
+                                    segments_out=segments)
         _set(job_id, state="summarising", progress=92)
         data = cloud.analyze(text, DATA_ROOT, engine.SYSTEM_PROMPT,
                              engine.ANALYSIS_SCHEMA,
                              style=job.get("style") or cloud.DEFAULT_STYLE,
-                             focus=job.get("focus") or "")
+                             focus=job.get("focus") or "",
+                             roster=job.get("roster") or "")
         if not engine._validate_analysis(data):
             raise RuntimeError("empty summary")
         data = engine._drop_hallucinations(data, text)
@@ -260,24 +300,20 @@ def _run_job(job_id):
         engine.gen_docx(data, docx)
         engine.gen_pptx(data, pptx)
         with open(txt, "w", encoding="utf-8") as f:
-            f.write(text)
+            # Timings make the transcript checkable against the recording
+            # instead of something you have to take on trust.
+            if segments:
+                for at, line in segments:
+                    f.write(f"[{int(at) // 60:02d}:{int(at) % 60:02d}] {line}\n")
+            else:
+                f.write(text)
 
-        files = {}
-        inline_budget = INLINE_LIMIT_BYTES
-        for k, p in (("docx", docx), ("pptx", pptx), ("transcript", txt)):
-            name = os.path.basename(p)
-            entry = {"name": name,
-                     "url": "/get/" + make_token(uid, name)}
-            try:
-                size = os.path.getsize(p)
-                if size <= inline_budget:
-                    with open(p, "rb") as fh:
-                        entry["data"] = base64.b64encode(fh.read()).decode()
-                    inline_budget -= size
-            except OSError:
-                pass
-            files[k] = entry
-        _set(job_id, state="done", progress=100, files=files,
+        files = _package(uid, (("docx", docx), ("pptx", pptx), ("transcript", txt)))
+        # The analysis goes back with the documents so the browser can show it
+        # for editing and ask for a rebuild without paying for the meeting
+        # twice. Keeping it client-side also means a server restart cannot
+        # strand a correction half-made.
+        _set(job_id, state="done", progress=100, files=files, analysis=data,
              title=data.get("meeting_title", ""), minutes=int((dur or 0) / 60))
     finally:
         try:
@@ -534,6 +570,7 @@ def upload():
          style=(request.form.get("style") or cloud.DEFAULT_STYLE).strip(),
          focus=(request.form.get("focus") or "").strip()[:600],
          hints=(request.form.get("hints") or "").strip()[:400],
+         roster=(request.form.get("roster") or "").strip()[:1200],
          created=time.time())
     _work.put(job_id)
     mins = int(dur / 60)
@@ -568,6 +605,65 @@ def job_status(job_id):
                         and v.get("created", 0) < j.get("created", 0))
         out["ahead"] = ahead
     return jsonify(out)
+
+
+@app.route("/regenerate", methods=["POST"])
+def regenerate():
+    """Rebuild the documents from a corrected summary.
+
+    One wrong name used to mean re-running the whole meeting and spending the
+    allowance again. Nothing here touches the AI service, so it costs nothing
+    and is not charged. The summary comes from the browser rather than server
+    memory, so a restart between generating and correcting does not lose it.
+    """
+    uid = require_user()
+    payload = request.get_json(silent=True) or {}
+    data = payload.get("analysis")
+    if not isinstance(data, dict):
+        return jsonify({"error": "Nothing to rebuild."}), 400
+    # Same coercion every other path goes through: whatever the browser sends,
+    # the generators see the shape they expect.
+    data = engine.normalise_analysis(data)
+    if not engine._validate_analysis(data):
+        return jsonify({"error": "That summary is empty - nothing to put in a "
+                                 "document."}), 400
+    out = user_dir(uid, "out")
+    stamp = time.strftime("%Y-%m-%d_%H-%M")
+    docx = os.path.join(out, f"{stamp}_minutes_edited.docx")
+    pptx = os.path.join(out, f"{stamp}_slides_edited.pptx")
+    try:
+        engine.gen_docx(data, docx)
+        engine.gen_pptx(data, pptx)
+    except Exception as e:
+        logging.exception("regenerate failed")
+        return jsonify({"error": f"Could not rebuild the documents: {e}"}), 500
+    return jsonify({"files": _package(uid, (("docx", docx), ("pptx", pptx))),
+                    "title": data.get("meeting_title", "")})
+
+
+@app.route("/wipe", methods=["POST"])
+def wipe():
+    """Delete everything this user has here, now, without waiting for retention.
+
+    Someone who has just put a confidential meeting through the wrong version
+    should not have to wait hours, or take our word for it.
+    """
+    uid = require_user()
+    removed = 0
+    d = user_dir(uid)
+    for root, _dirs, names in os.walk(d):
+        for n in names:
+            try:
+                os.remove(os.path.join(root, n))
+                removed += 1
+            except OSError:
+                pass
+    with _jobs_lock:
+        for jid in [j for j, v in JOBS.items() if v.get("uid") == uid
+                    and v.get("state") in ("done", "error")]:
+            JOBS.pop(jid, None)
+    logging.info("wipe: %d file(s) removed for one user", removed)
+    return jsonify({"ok": True, "removed": removed})
 
 
 @app.route("/recent")
@@ -679,7 +775,22 @@ text-align:center}
 background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 #recTime{font-size:20px;font-variant-numeric:tabular-nums;color:var(--txt)}
-#recStop{margin-top:12px;background:var(--red)}
+#recStop{margin-top:8px;background:var(--red)}
+#recMeter{height:8px;background:var(--card2);border-radius:6px;overflow:hidden;
+margin-top:10px}
+#recMeter>i{display:block;height:100%;width:0;background:var(--blue);
+transition:width .1s linear}
+/* --- edit before export --- */
+#editForm{margin-top:10px}
+#editForm .row{background:var(--card2);border:1px solid var(--line);
+border-radius:10px;padding:10px;margin-top:8px}
+#editForm .row .n{font-size:11px;color:var(--muted);margin-bottom:4px}
+#editForm input,#editForm textarea{width:100%;background:var(--card);
+border:1px solid var(--line);border-radius:8px;color:var(--txt);
+font-size:13px;padding:8px;font-family:inherit;margin-bottom:6px}
+#editForm textarea{min-height:52px;resize:vertical}
+#editForm h4{font-size:12px;color:var(--muted);margin:16px 0 2px;
+text-transform:uppercase;letter-spacing:.4px}
 </style></head><body><div class="wrap">
 <h1>MinitAI</h1>
 <div class="sub">Meeting audio in. Professional minutes out.</div>
@@ -709,7 +820,11 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
 
   <div id="recLive" class="hide">
     <div><span id="recDot"></span><span id="recTime">0:00</span></div>
+    <div id="recMeter"><i></i></div>
     <div class="note" style="margin-top:6px" id="recHint"></div>
+    <div class="note hide" id="recQuiet">No sound is reaching the microphone.</div>
+    <button type="button" class="rec" id="recPause"
+            style="width:100%;margin-top:10px">Pause</button>
     <button type="button" id="recStop">Stop and use this recording</button>
   </div>
 
@@ -744,10 +859,33 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
     get them right.</div>
   <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Prof Lim, Bil 1/2026">
 
+  <label for="roster">Who was there? (optional)</label>
+  <div class="note" style="margin:0 0 6px">One name per line. This fills the
+    KEHADIRAN section, tells the transcriber how the names are spelt, and stops
+    it inventing people who were only mentioned.</div>
+  <textarea id="roster" rows="3"
+    placeholder="Dr. Hafizah&#10;Prof. Madya Dr. Maurin&#10;Puan Marja"
+    style="width:100%;background:var(--card2);border:1px solid var(--line);
+           border-radius:10px;color:var(--txt);font-size:14px;padding:11px;
+           font-family:inherit;resize:vertical"></textarea>
+
   <button id="go" disabled>Choose a recording first</button>
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
   <div class="msg" id="msg"></div>
   <div id="files"></div>
+
+  <button type="button" class="rec hide" id="editOpen"
+          style="width:100%;margin-top:10px">Fix something before you save</button>
+  <div id="editWrap" class="hide">
+    <div class="note" style="margin-top:12px">Correct anything that came out
+      wrong, then rebuild. This does not use the AI service again, so it costs
+      nothing and is not deducted from your allowance.</div>
+    <div id="editForm"></div>
+    <button type="button" id="editSave" style="margin-top:12px">Rebuild the documents</button>
+    <button type="button" class="rec" id="editCancel"
+            style="width:100%;margin-top:8px">Cancel</button>
+  </div>
+
   <div class="note" id="quota"></div>
   <div id="recentWrap" class="hide">
     <label style="margin-top:18px">Recent documents</label>
@@ -759,12 +897,18 @@ background:var(--red);margin-right:8px;animation:pulse 1.4s infinite}
   </div>
   <div class="note" style="text-align:right">
     <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
-  <div class="note">Your audio is sent to an AI service to be processed, then
-    deleted. Your documents are handed straight to your browser; a short-lived
-    copy stays on the server so a refresh cannot lose them, and that copy goes
-    when the server sleeps. Save them somewhere you will find them again.
+  <div class="note">Your audio is sent to <b>Groq, an AI service in the United
+    States</b>, to be transcribed, then deleted there. That is a transfer of
+    your recording outside Malaysia &mdash; by uploading, you are agreeing to it,
+    and you should have everyone's agreement before recording them at all.
+    Your documents are handed straight to your browser; a short-lived copy
+    stays on the server so a refresh cannot lose them, and that copy goes when
+    the server sleeps. Save them somewhere you will find them again.
     For confidential meetings, use the desktop version, which never uploads
     anything.</div>
+  <button type="button" class="rec" id="wipeBtn"
+          style="width:100%;margin-top:10px">Delete everything of mine on the server</button>
+  <div class="note hide" id="wipeMsg"></div>
 </div>
 <script>
 const $=i=>document.getElementById(i);
@@ -803,6 +947,11 @@ function pick(f){if(!f)return;file=f;
 // browser implements it - so phones get the microphone, which is the right
 // tool for a meeting held in a room anyway.
 var rec=null, recChunks=[], recStreams=[], recTimer=null, recStart=0, recLock=null;
+var recPaused=false, recPausedMs=0, recPauseAt=0, recAnalyser=null, recMeterTimer=null;
+function recElapsed(){
+  var end = recPaused ? recPauseAt : Date.now();
+  return Math.max(0, Math.floor((end - recStart - recPausedMs)/1000));
+}
 var CAN_TAB = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
 var CAN_MIC = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
@@ -893,6 +1042,24 @@ async function recStartMode(mode){
   if(navigator.wakeLock && navigator.wakeLock.request){
     navigator.wakeLock.request('screen').then(function(l){ recLock=l; },function(){});
   }
+  // A level meter is the difference between recording a meeting and recording
+  // ninety minutes of a muted microphone.
+  try{
+    recAnalyser=ac.createAnalyser(); recAnalyser.fftSize=512;
+    ac.createMediaStreamSource(dest.stream).connect(recAnalyser);
+    var mbuf=new Uint8Array(recAnalyser.frequencyBinCount), quiet=0;
+    recMeterTimer=setInterval(function(){
+      if(recPaused) return;
+      recAnalyser.getByteTimeDomainData(mbuf);
+      var peak=0;
+      for(var i=0;i<mbuf.length;i++){ var v=Math.abs(mbuf[i]-128); if(v>peak)peak=v; }
+      var pct=Math.min(100,Math.round(peak/128*260));
+      $('recMeter').firstElementChild.style.width=pct+'%';
+      quiet = pct<2 ? quiet+1 : 0;
+      $('recQuiet').classList.toggle('hide', quiet<25);   // ~5 seconds of silence
+    },200);
+  }catch(e){}
+  recPaused=false; recPausedMs=0; $('recPause').textContent='Pause';
   recStart=Date.now();
   $('recBar').classList.add('hide');
   $('recLive').classList.remove('hide');
@@ -905,7 +1072,8 @@ async function recStartMode(mode){
     if(j && j.signed_in) budget=Math.max(0,(j.daily_limit||0)-(j.used_minutes||0));
   }).catch(function(){});
   recTimer=setInterval(function(){
-    var secs=Math.floor((Date.now()-recStart)/1000);
+    if(recPaused) return;
+    var secs=recElapsed();
     $('recTime').textContent=fmt(secs);
     var mins=secs/60;
     if(budget && mins>budget){
@@ -936,7 +1104,7 @@ function recStopNow(){
 function recFinish(){
   var mt=(rec && rec.mimeType) || 'audio/webm';
   var ext = mt.indexOf('mp4')>-1 ? '.mp4' : (mt.indexOf('ogg')>-1 ? '.ogg' : '.webm');
-  var secs=Math.max(1,Math.round((Date.now()-recStart)/1000));
+  var secs=Math.max(1, recElapsed());
   var blob=new Blob(recChunks,{type:mt.split(';')[0]});
   recCleanup();
   if(blob.size<2048){
@@ -952,6 +1120,11 @@ function recFinish(){
 
 function recCleanup(){
   if(recTimer){ clearInterval(recTimer); recTimer=null; }
+  if(recMeterTimer){ clearInterval(recMeterTimer); recMeterTimer=null; }
+  recAnalyser=null; recPaused=false; recPausedMs=0;
+  $('recQuiet').classList.add('hide');
+  $('recDot').style.animationPlayState='running';
+  $('recMeter').firstElementChild.style.width='0%';
   recStreams.forEach(function(s){ s.getTracks().forEach(function(t){ t.stop(); }); });
   recStreams=[]; rec=null;
   $('recTime').style.color='';
@@ -966,7 +1139,7 @@ function recCleanup(){
 // invents spellings. Kept in this browser only: the server's disk is wiped
 // whenever the free instance sleeps, so it could not hold this if it tried.
 (function(){
-  var KEYS=['hints','lang','style'];
+  var KEYS=['hints','lang','style','roster'];
   try{
     KEYS.forEach(function(k){
       var v=localStorage.getItem('minitai.'+k);
@@ -975,14 +1148,60 @@ function recCleanup(){
         try{ localStorage.setItem('minitai.'+k,$(k).value); }catch(e){}
       });
     });
-    if($('hints')) $('hints').addEventListener('blur',function(){
-      try{ localStorage.setItem('minitai.hints',$('hints').value); }catch(e){}
+    ['hints','roster'].forEach(function(k){
+      if($(k)) $(k).addEventListener('blur',function(){
+        try{ localStorage.setItem('minitai.'+k,$(k).value); }catch(e){}
+      });
     });
   }catch(e){}         // private browsing blocks storage; not worth failing over
 })();
 
+// Two taps rather than a browser confirm box: a native dialog blocks the page
+// and cannot be styled, and this is a destructive action worth slowing down.
+var wipeArmed=false;
+$('wipeBtn').onclick=async function(){
+  if(!wipeArmed){
+    wipeArmed=true;
+    $('wipeBtn').textContent='Tap again to delete everything permanently';
+    setTimeout(function(){
+      wipeArmed=false;
+      $('wipeBtn').textContent='Delete everything of mine on the server';
+    },6000);
+    return;
+  }
+  wipeArmed=false; $('wipeBtn').disabled=true;
+  $('wipeBtn').textContent='Deleting\u2026';
+  try{
+    var r=await fetch('/wipe',{method:'POST'});
+    var j=await r.json();
+    $('wipeMsg').classList.remove('hide');
+    $('wipeMsg').textContent='Deleted '+(j.removed||0)+' file(s). Anything already '
+      +'downloaded to this device is still yours.';
+    $('files').innerHTML=''; $('recent').innerHTML='';
+    $('recentWrap').classList.add('hide');
+    $('editOpen').classList.add('hide'); $('editWrap').classList.add('hide');
+  }catch(e){
+    $('wipeMsg').classList.remove('hide');
+    $('wipeMsg').textContent='Could not delete: '+(e.message||e);
+  }
+  $('wipeBtn').disabled=false;
+  $('wipeBtn').textContent='Delete everything of mine on the server';
+};
+
 $('recMic').onclick=function(){ recStartMode('mic'); };
 $('recTab').onclick=function(){ recStartMode('tab'); };
+$('recPause').onclick=function(){
+  if(!rec) return;
+  if(recPaused){
+    try{ rec.resume(); }catch(e){ return; }
+    recPausedMs += Date.now()-recPauseAt; recPaused=false;
+    $('recPause').textContent='Pause'; $('recDot').style.animationPlayState='running';
+  } else {
+    try{ rec.pause(); }catch(e){ return; }
+    recPauseAt=Date.now(); recPaused=true;
+    $('recPause').textContent='Resume'; $('recDot').style.animationPlayState='paused';
+  }
+};
 $('recStop').onclick=recStopNow;
 
 $('go').onclick=async()=>{
@@ -992,6 +1211,7 @@ $('go').onclick=async()=>{
   $('barWrap').classList.remove('hide');$('bar').style.width='4%';
   const fd=new FormData();fd.append('audio',file);
   fd.append('lang',$('lang').value);fd.append('hints',$('hints').value);
+  fd.append('roster',$('roster').value);
   fd.append('style',$('style').value);
   fd.append('focus',$('focus').value);
   const {ok,j}=await api('/upload',{method:'POST',body:fd});
@@ -1029,32 +1249,9 @@ async function check(id,noAuto){
     $('barWrap').classList.add('hide');
     $('msg').className='msg ok';
     $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
-    const L={docx:'Word document (.docx)',pptx:'Slides (.pptx)',transcript:'Full transcript (.txt)'};
-    const MIME={docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-                transcript:'text/plain'};
-    $('files').innerHTML='';
-    let first=null;
-    Object.entries(j.files||{}).forEach(([k,v])=>{
-      const a=document.createElement('a');
-      a.className='file'; a.download=v.name; a.textContent='Download '+L[k];
-      if(v.data){
-        // Held in the browser, not on the server. Survives the server sleeping.
-        const bin=atob(v.data); const buf=new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
-        a.href=URL.createObjectURL(new Blob([buf],{type:MIME[k]||'application/octet-stream'}));
-        if(k==='docx')first=a;
-      } else { a.href=v.url; }
-      $('files').appendChild(a);
-    });
-    $('files').insertAdjacentHTML('beforeend',
-      '<div class="note">The minutes save to your downloads automatically. '
-      +'Tap the other two if you want them as well.</div>');
-    // Only ONE automatic download. Browsers challenge the second and third
-    // with a "allow multiple downloads?" prompt that people dismiss, and the
-    // files were then lost. The rest stay one tap away, and Recent documents
-    // below survives a refresh.
-    if(first&&!noAuto)setTimeout(()=>{try{first.click();}catch(e){}},400);
+    renderFiles(j.files, !noAuto);
+    lastAnalysis = j.analysis || null;
+    if(lastAnalysis) $('editOpen').classList.remove('hide');
     reset(); loadMe(); loadRecent(); return;
   }
   if(j.state==='queued'&&j.ahead>0){
@@ -1062,6 +1259,173 @@ async function check(id,noAuto){
       :'Waiting \\u2014 '+j.ahead+' meetings ahead of yours\\u2026'; return;}
   $('msg').textContent=NICE[j.state]||'Working\\u2026';
 }
+var lastAnalysis=null;
+var FILE_LABEL={docx:'Word document (.docx)',pptx:'Slides (.pptx)',
+                transcript:'Full transcript (.txt)'};
+var FILE_MIME={docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+               pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+               transcript:'text/plain'};
+
+function renderFiles(files, autoSave){
+  $('files').innerHTML='';
+  var first=null;
+  Object.entries(files||{}).forEach(function(pair){
+    var k=pair[0], v=pair[1];
+    var a=document.createElement('a');
+    a.className='file'; a.download=v.name; a.textContent='Download '+(FILE_LABEL[k]||v.name);
+    if(v.data){
+      // Held in the browser, not on the server. Survives the server sleeping.
+      var bin=atob(v.data), buf=new Uint8Array(bin.length);
+      for(var i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
+      a.href=URL.createObjectURL(new Blob([buf],{type:FILE_MIME[k]||'application/octet-stream'}));
+      if(k==='docx')first=a;
+    } else { a.href=v.url; }
+    $('files').appendChild(a);
+  });
+  $('files').insertAdjacentHTML('beforeend',
+    '<div class="note">The minutes save to your downloads automatically. '
+    +'Tap the other two if you want them as well.</div>');
+  addShare(files);
+  // Only ONE automatic download. Browsers challenge the second and third
+  // with a "allow multiple downloads?" prompt that people dismiss, and the
+  // files were then lost. The rest stay one tap away, and Recent documents
+  // below survives a refresh.
+  if(first&&autoSave)setTimeout(function(){try{first.click();}catch(e){}},400);
+}
+
+// ------------------------------------------------------------------- sharing
+// On a phone the share sheet can hand the actual .docx to WhatsApp. On a
+// desktop it usually cannot, so those get a message with the meeting name and
+// a reminder to attach the file they just downloaded - honest about the limit
+// rather than silently sharing a link nobody else can open.
+function blobFor(v){
+  if(!v||!v.data) return null;
+  var bin=atob(v.data), buf=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
+  return new Blob([buf],{type:FILE_MIME.docx});
+}
+function addShare(files){
+  var v=(files||{}).docx; if(!v) return;
+  var title=($('msg').textContent||'Minit mesyuarat').replace(/^Done \u2014 /,'');
+  var wrap=document.createElement('div'); wrap.id='shareRow';
+  wrap.style.cssText='display:flex;gap:9px;margin-top:10px';
+  var blob=blobFor(v);
+  var f=null;
+  try{ if(blob) f=new File([blob],v.name,{type:blob.type}); }catch(e){}
+  if(f && navigator.canShare && navigator.canShare({files:[f]})){
+    var b=document.createElement('button');
+    b.type='button'; b.className='rec'; b.textContent='Share the document';
+    b.onclick=function(){ navigator.share({files:[f],title:title}).catch(function(){}); };
+    wrap.appendChild(b);
+  } else {
+    var msg=encodeURIComponent('Minit mesyuarat: '+title
+      +' \u2014 dokumen Word dilampirkan. (Dijana dengan MinitAI.)');
+    var w=document.createElement('a');
+    w.className='rec'; w.style.cssText='display:block;text-align:center;padding:11px 8px;'
+      +'border-radius:10px;text-decoration:none;flex:1';
+    w.target='_blank'; w.rel='noopener';
+    w.href='https://wa.me/?text='+msg; w.textContent='Send on WhatsApp';
+    var m=document.createElement('a');
+    m.className='rec'; m.style.cssText=w.style.cssText;
+    m.href='mailto:?subject='+encodeURIComponent('Minit mesyuarat: '+title)
+      +'&body='+msg; m.textContent='Send by email';
+    wrap.appendChild(w); wrap.appendChild(m);
+    wrap.insertAdjacentHTML('afterend','');
+  }
+  $('files').appendChild(wrap);
+  if(!(f && navigator.canShare && navigator.canShare({files:[f]}))){
+    $('files').insertAdjacentHTML('beforeend',
+      '<div class="note">WhatsApp and email cannot pick up the file by '
+      +'themselves on a computer &mdash; attach the document you just '
+      +'downloaded.</div>');
+  }
+}
+
+// ------------------------------------------------------------- edit + rebuild
+function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;')
+  .replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function buildEditor(){
+  var d=lastAnalysis||{}, h='';
+  h+='<h4>Maklumat mesyuarat</h4>';
+  [['meeting_title','Tajuk'],['date','Tarikh'],['time','Masa'],['location','Tempat']]
+    .forEach(function(f){
+      h+='<div class="n">'+f[1]+'</div><input data-f="'+f[0]+'" value="'+esc(d[f[0]])+'">';
+    });
+  h+='<div class="n">Kehadiran (pisahkan dengan koma)</div>'
+    +'<input data-f="attendees" value="'+esc((d.attendees||[]).join(', '))+'">';
+  h+='<h4>Perkara dibincangkan</h4>';
+  (d.agenda_items||[]).forEach(function(it,i){
+    h+='<div class="row" data-agenda="'+i+'">'
+      +'<div class="n">'+(i+1)+'.0 Tajuk perkara</div><input data-a="topic" value="'+esc(it.topic)+'">'
+      +'<div class="n">Perbincangan</div><textarea data-a="discussion">'+esc(it.discussion)+'</textarea>'
+      +'<div class="n">Keputusan</div><textarea data-a="decision">'+esc(it.decision)+'</textarea>'
+      +'</div>';
+  });
+  h+='<h4>Tindakan</h4>';
+  (d.action_items||[]).forEach(function(it,i){
+    h+='<div class="row" data-action="'+i+'">'
+      +'<div class="n">Tindakan</div><input data-t="task" value="'+esc(it.task)+'">'
+      +'<div class="n">Pegawai bertanggungjawab</div><input data-t="owner" value="'+esc(it.owner)+'">'
+      +'<div class="n">Tarikh akhir</div><input data-t="deadline" value="'+esc(it.deadline)+'">'
+      +'</div>';
+  });
+  h+='<h4>Catatan penting</h4>'
+    +'<div class="n">Satu baris setiap catatan. Kosongkan baris untuk membuangnya.</div>'
+    +'<textarea data-f="important_notes" style="min-height:90px">'
+    +esc((d.important_notes||[]).join('\\n'))+'</textarea>';
+  $('editForm').innerHTML=h;
+}
+
+function collectEditor(){
+  var d=JSON.parse(JSON.stringify(lastAnalysis||{}));
+  $('editForm').querySelectorAll('[data-f]').forEach(function(el){
+    var f=el.getAttribute('data-f');
+    if(f==='attendees') d.attendees=el.value.split(',').map(function(s){return s.trim();}).filter(Boolean);
+    else if(f==='important_notes') d.important_notes=el.value.split('\\n').map(function(s){return s.trim();}).filter(Boolean);
+    else d[f]=el.value.trim();
+  });
+  d.agenda_items=[];
+  $('editForm').querySelectorAll('[data-agenda]').forEach(function(row){
+    var g=function(k){var e=row.querySelector('[data-a="'+k+'"]');return e?e.value.trim():'';};
+    if(g('topic')) d.agenda_items.push({topic:g('topic'),discussion:g('discussion'),decision:g('decision')});
+  });
+  d.action_items=[];
+  $('editForm').querySelectorAll('[data-action]').forEach(function(row){
+    var g=function(k){var e=row.querySelector('[data-t="'+k+'"]');return e?e.value.trim():'';};
+    if(g('task')) d.action_items.push({task:g('task'),owner:g('owner'),deadline:g('deadline')});
+  });
+  return d;
+}
+
+$('editOpen').onclick=function(){
+  buildEditor();
+  $('editWrap').classList.remove('hide');
+  $('editOpen').classList.add('hide');
+};
+$('editCancel').onclick=function(){
+  $('editWrap').classList.add('hide');
+  $('editOpen').classList.remove('hide');
+};
+$('editSave').onclick=async function(){
+  var btn=$('editSave'); btn.disabled=true; btn.textContent='Rebuilding\\u2026';
+  try{
+    var body=JSON.stringify({analysis:collectEditor()});
+    var r=await fetch('/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:body});
+    var j=await r.json();
+    if(!r.ok) throw new Error(j.error||'Rebuild failed.');
+    lastAnalysis=collectEditor();
+    renderFiles(j.files,false);      // no auto-download; they asked for this one
+    $('msg').className='msg ok';
+    $('msg').textContent='Rebuilt'+(j.title?' \\u2014 '+j.title:'')+'. Tap to download.';
+    $('editWrap').classList.add('hide'); $('editOpen').classList.remove('hide');
+    loadRecent();
+  }catch(e){
+    $('msg').className='msg err'; $('msg').textContent=e.message||'Rebuild failed.';
+  }
+  btn.disabled=false; btn.textContent='Rebuild the documents';
+};
+
 // Back to a clean form, so nobody re-uploads the same meeting by accident and
 // pays for it twice.
 function reset(){

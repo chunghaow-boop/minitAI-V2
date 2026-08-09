@@ -220,7 +220,11 @@ check("Health endpoint leaks no secrets",
 
 # ------------------------------------------------------------ page content
 page = h.data.decode()
-check("Page states audio is uploaded", "sent to an AI service" in page)
+check("Page states audio is uploaded",
+      "an AI service in the United" in " ".join(page.split()))
+check("Page discloses the transfer out of Malaysia",
+      "outside Malaysia" in " ".join(page.split()))
+check("Page offers a way to delete everything", 'id="wipeBtn"' in page)
 _flat_page = " ".join(page.split())
 check("Page is honest about where documents live",
       "copy stays on the server" in _flat_page
@@ -228,7 +232,17 @@ check("Page is honest about where documents live",
       and "Save them somewhere you will find them again" in _flat_page)
 check("Page points confidential users to the desktop version",
       "desktop version" in page and "never uploads" in page)
-check("Page loads nothing from the internet", "http://" not in page and "https://" not in page)
+# Nothing may be FETCHED from the internet - no third-party script, stylesheet,
+# font or image, so the page cannot leak who is reading it and works offline.
+# A share link the user has to click is different in kind: it navigates only
+# when someone chooses to send the minutes on. wa.me is the one allowed.
+import re as _re
+_tags = _re.findall(r'<(?:script|link|img|iframe|source|video|audio)\b[^>]*>', page, _re.I)
+check("Page fetches nothing from the internet",
+      not any(_re.search(r'https?://', t) for t in _tags))
+_ext = set(_re.findall(r'https?://[^\s"\'<>()]+', page))
+check("The only outbound link is the WhatsApp share",
+      all(u.startswith("https://wa.me/") for u in _ext))
 
 # ---------------------------------------------- Groq request shape
 # The first live deploy failed with HTTP 400 on BOTH json_schema and
