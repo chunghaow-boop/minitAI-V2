@@ -221,8 +221,11 @@ check("Health endpoint leaks no secrets",
 # ------------------------------------------------------------ page content
 page = h.data.decode()
 check("Page states audio is uploaded", "sent to an AI service" in page)
+_flat_page = " ".join(page.split())
 check("Page is honest about where documents live",
-      "not\n    stored on the server" in page or "not stored on the server" in " ".join(page.split()))
+      "copy stays on the server" in _flat_page
+      and "that copy goes when the server sleeps" in _flat_page
+      and "Save them somewhere you will find them again" in _flat_page)
 check("Page points confidential users to the desktop version",
       "desktop version" in page and "never uploads" in page)
 check("Page loads nothing from the internet", "http://" not in page and "https://" not in page)
@@ -311,8 +314,10 @@ check("Page still falls back to the server link", "a.href=v.url" in _page2)
 check("Expired-link message explains the real cause and the fix",
       "goes to sleep" in open("app.py").read()
       and "upload the recording again" in open("app.py").read())
+_flat2 = " ".join(_page2.split())
 check("Page no longer promises server-side retention",
-      "not stored on the server" in " ".join(_page2.split()))
+      "that copy goes when the server sleeps" in _flat2
+      and "the server clears them when it goes to sleep" in _flat2)
 
 # ---------------------------------------------- audio AND video formats
 # Users record on phones and in Zoom/Meet, so mp3/mp4/mkv/mov must be accepted

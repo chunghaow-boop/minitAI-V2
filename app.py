@@ -728,14 +728,17 @@ a.file:hover{border-color:var(--blue)}
   <div id="recentWrap" class="hide">
     <label style="margin-top:18px">Recent documents</label>
     <div class="note" style="margin:0 0 6px">Still here if you closed the page
-      or refreshed by accident. Cleared automatically after {{ retention }} hours.</div>
+      or refreshed by accident. These sit on the server, and the server clears
+      them when it goes to sleep &mdash; often within the hour, and after
+      {{ retention }} hours at the latest. Save anything you want to keep.</div>
     <div id="recent"></div>
   </div>
   <div class="note" style="text-align:right">
     <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
   <div class="note">Your audio is sent to an AI service to be processed, then
-    deleted. Your documents are handed straight to your browser and are not
-    stored on the server, so save them somewhere you will find them again.
+    deleted. Your documents are handed straight to your browser; a short-lived
+    copy stays on the server so a refresh cannot lose them, and that copy goes
+    when the server sleeps. Save them somewhere you will find them again.
     For confidential meetings, use the desktop version, which never uploads
     anything.</div>
 </div>

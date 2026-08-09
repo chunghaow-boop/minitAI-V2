@@ -1073,6 +1073,7 @@ _DOC_LABELS = {
            "notes": "Important Notes", "actions": "Action Items",
            "task": "Task", "owner": "Owner", "deadline": "Deadline",
            "date": "Date", "time": "Time", "location": "Location",
+           "no_decision": "No decision recorded",
            "fallback_title": "Meeting Minutes"},
     "ms": {"attendees": "Kehadiran", "activities": "Aktiviti",
            "matters": "Perkara Dibincangkan", "decision": "Keputusan: ",
@@ -1081,6 +1082,7 @@ _DOC_LABELS = {
            "task": "Tindakan", "owner": "Pegawai Bertanggungjawab",
            "deadline": "Tarikh Akhir",
            "date": "Tarikh", "time": "Masa", "location": "Tempat",
+           "no_decision": "Tiada keputusan direkodkan",
            "fallback_title": "Minit Mesyuarat"},
     "zh": {"attendees": "出席者", "activities": "活动",
            "matters": "讨论事项", "decision": "决定: ",
@@ -1088,6 +1090,7 @@ _DOC_LABELS = {
            "notes": "重要事项", "actions": "行动事项",
            "task": "事项", "owner": "负责人", "deadline": "期限",
            "date": "日期", "time": "时间", "location": "地点",
+           "no_decision": "未作出决定",
            "fallback_title": "会议记录"},
 }
 
@@ -1177,7 +1180,10 @@ def normalise_analysis(data):
     actions = []
     for it in _as_list(data.get("action_items")):
         if isinstance(it, dict):
-            actions.append({"task": _as_text(it.get("task")).strip(),
+            _task = _as_text(it.get("task")).strip()
+            if not _task:
+                continue            # an empty task is a blank row, not an action
+            actions.append({"task": _task,
                             "owner": _as_text(it.get("owner")).strip(),
                             "deadline": _as_text(it.get("deadline")).strip()})
         elif _as_text(it).strip():
@@ -1312,10 +1318,15 @@ def gen_docx(data, path):
             if item.get("discussion"):
                 doc.add_paragraph(item["discussion"])
             if item.get("decision"):
+                # The model is told to write the English phrase when nothing was
+                # agreed; translate it so a Malay document stays Malay.
+                _dec = item["decision"]
+                if _dec.strip().rstrip(".").lower() == "no decision recorded":
+                    _dec = L.get("no_decision", _dec)
                 dp = doc.add_paragraph()
                 dr = dp.add_run(L["decision"])
                 dr.bold = True; dr.font.color.rgb = primary
-                dp.add_run(item["decision"])
+                dp.add_run(_dec)
 
     # ---- Key points ----
     if data.get("key_points"):
