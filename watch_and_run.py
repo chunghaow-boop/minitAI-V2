@@ -15,8 +15,6 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.dml.color import RGBColor
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
 import logging
 import sqlite3
@@ -2110,19 +2108,23 @@ def process(audio_path):
     print(f"Done: {os.path.basename(docx_path)}, {os.path.basename(pptx_path)}")
 
 
-class Handler(FileSystemEventHandler):
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        if event.src_path.lower().endswith(AUDIO_EXTS):
-            time.sleep(2)  # wait for file write to finish
-            try:
-                process(event.src_path)
-            except Exception as e:
-                print(f"Error processing {event.src_path}: {e}")
-
-
 if __name__ == "__main__":
+    # Imported here, not at module load: the folder watcher is a desktop-only
+    # convenience and the hosted version does not install watchdog.
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
+    class Handler(FileSystemEventHandler):
+        def on_created(self, event):
+            if event.is_directory:
+                return
+            if event.src_path.lower().endswith(AUDIO_EXTS):
+                time.sleep(2)  # wait for file write to finish
+                try:
+                    process(event.src_path)
+                except Exception as e:
+                    print(f"Error processing {event.src_path}: {e}")
+
     os.makedirs(AUDIO_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
