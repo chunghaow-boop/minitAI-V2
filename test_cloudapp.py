@@ -295,7 +295,7 @@ _ext = set(_re.findall(r'https?://[^\s"\'<>()]+', page))
 # the script tag is only appended when someone clicks "Save to Google Drive",
 # so a user who never touches Drive still loads a page that fetches nothing.
 _ALLOWED_HOSTS = ("https://wa.me/", "https://accounts.google.com/gsi/client",
-                  "https://www.googleapis.com/")
+                  "https://www.googleapis.com/", "https://mail.google.com/mail/")
 check("Every outbound URL is one we chose deliberately",
       all(u.startswith(_ALLOWED_HOSTS) for u in _ext))
 check("Google's script is loaded on demand, not on page load",
@@ -344,6 +344,18 @@ check("Admin counters say plainly that they reset",
 os.environ.pop("MINITAI_ADMIN_CODE", None)
 check("With no admin code configured, nobody is admin",
       client().get("/admin").status_code in (401, 404))
+
+# mailto: opens nothing on a machine with no mail client registered, which is
+# most Windows laptops. The button looked broken because it was.
+# The feedback link still uses mailto: deliberately - it is a link to Gavril,
+# not a share button, and there is nothing better to point it at.
+check("Email uses a web compose, not mailto:",
+      "mail.google.com/mail/?view=cm" in page
+      and "m.href='mailto:" not in page)
+check("Share buttons carry their own styling",
+      "background:var(--card2);border:1px solid var(--line)" in page)
+check("The share message uses the meeting title, not the status line",
+      "lastAnalysis && lastAnalysis.meeting_title" in page)
 
 check("Drive history is offered without a pop-up on every visit",
       "driveReconnect" in page and "prompt:''" in page

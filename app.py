@@ -2114,12 +2114,31 @@ var GIS_SRC='https://accounts.google.com/gsi/client';
 var driveToken=null, driveTokenClient=null, driveFiles=null, gisReady=null;
 
 function loadGis(){
+  // Only cache SUCCESS. Caching the rejection meant one failed attempt poisoned
+  // every later click, so the button stayed broken even after the cause was
+  // gone.
+  if(window.google && google.accounts && google.accounts.oauth2)
+    return Promise.resolve();
   if(gisReady) return gisReady;
   gisReady=new Promise(function(res,rej){
     var t=document.createElement('script');
     t.src=GIS_SRC; t.async=true; t.defer=true;
-    t.onload=res; t.onerror=function(){ rej(new Error('Could not reach Google.')); };
+    t.onload=function(){ res(); };
+    t.onerror=function(){
+      gisReady=null;                       // let the next click try again
+      rej(new Error("Google's sign-in script was blocked before it loaded. "
+        + "This is almost always an ad or privacy blocker - check for a blocked "
+        + "request to accounts.google.com and allow this site."));
+    };
     document.head.appendChild(t);
+    // Some blockers neither load nor fire onerror; they just swallow it.
+    setTimeout(function(){
+      if(!(window.google && google.accounts)){
+        gisReady=null;
+        rej(new Error("Google's sign-in script did not load. An ad or privacy "
+          + "blocker is the usual cause - allow accounts.google.com for this site."));
+      }
+    }, 12000);
   });
   return gisReady;
 }
@@ -2314,8 +2333,10 @@ function blobFor(v){
   for(var i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
   return new Blob([buf],{type:FILE_MIME.docx});
 }
-var SHARE_CSS='display:block;text-align:center;padding:11px 8px;'
-  +'border-radius:10px;text-decoration:none;flex:1';
+var SHARE_CSS='display:flex;align-items:center;justify-content:center;'
+  +'padding:11px 8px;border-radius:10px;text-decoration:none;flex:1 1 45%;'
+  +'background:var(--card2);border:1px solid var(--line);color:var(--txt);'
+  +'font-size:13px;cursor:pointer';
 function shareMsg(title){
   return encodeURIComponent('Minit mesyuarat: '+title
     +' \u2014 dokumen Word dilampirkan. (Dijana dengan MinitAI.)');
@@ -2329,13 +2350,33 @@ function waLink(title){
 function mailLink(title){
   var m=document.createElement('a');
   m.className='rec'; m.style.cssText=SHARE_CSS;
-  m.href='mailto:?subject='+encodeURIComponent('Minit mesyuarat: '+title)
-    +'&body='+shareMsg(title); m.textContent='Send by email';
+  m.target='_blank'; m.rel='noopener';
+  // Not mailto: - most Windows laptops have no mail client registered, so the
+  // link silently does nothing at all. Gmail's web compose always opens.
+  m.href='https://mail.google.com/mail/?view=cm&fs=1&su='
+    + encodeURIComponent('Minit mesyuarat: '+title) + '&body=' + shareMsg(title);
+  m.textContent='Send by email';
   return m;
+}
+
+function copyBtn(title){
+  var b=document.createElement('button');
+  b.type='button'; b.className='rec'; b.style.cssText=SHARE_CSS;
+  b.textContent='Copy the message';
+  b.onclick=function(){
+    var txt=decodeURIComponent(shareMsg(title));
+    (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject())
+      .then(function(){ b.textContent='Copied \u2713';
+             setTimeout(function(){ b.textContent='Copy the message'; },2000); },
+            function(){ b.textContent='Could not copy'; });
+  };
+  return b;
 }
 function addShare(files){
   var v=(files||{}).docx; if(!v) return;
-  var title=($('msg').textContent||'Minit mesyuarat').replace(/^Done \u2014 /,'');
+  var title=(lastAnalysis && lastAnalysis.meeting_title)
+    || ($('msg').textContent||'').replace(/^Done( \u2014 )?/,'').trim()
+    || 'Minit mesyuarat';
   var wrap=document.createElement('div'); wrap.id='shareRow';
   wrap.style.cssText='display:flex;gap:9px;margin-top:10px';
   var blob=blobFor(v);
@@ -2359,7 +2400,9 @@ function addShare(files){
     wrap.appendChild(b);
   } else {
     wrap.appendChild(waLink(title)); wrap.appendChild(mailLink(title));
+    wrap.appendChild(copyBtn(title));
   }
+  wrap.style.flexWrap='wrap';
   $('files').appendChild(wrap);
   if(!(f && navigator.canShare && navigator.canShare({files:[f]}))){
     $('files').insertAdjacentHTML('beforeend',
