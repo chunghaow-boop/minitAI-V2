@@ -531,7 +531,17 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
                     "minutes that THIS meeting actually returned to - what has "
                     "happened since, and where it now stands. Only matters this "
                     "recording genuinely discussed. Never carry an item over just "
-                    "because it appears in the old minutes.")
+                    "because it appears in the old minutes."
+                    "\n\nThose old minutes are BACKGROUND ONLY. Everything else you "
+                    "produce must come from THIS recording:"
+                    "\n- action_items: only tasks assigned in THIS meeting. Never "
+                    "copy an action out of the old minutes. If an old action is "
+                    "still outstanding, say so inside its Perkara Berbangkit item "
+                    "instead."
+                    "\n- meeting_title: the title of THIS meeting. Never title a "
+                    "meeting after a matter arising, and never begin the title "
+                    "with \"Perkara Berbangkit\"."
+                    "\n- attendees: only people present at THIS meeting.")
 
     text = transcript_text or ""
     if len(text) <= MAP_REDUCE_OVER_CHARS:

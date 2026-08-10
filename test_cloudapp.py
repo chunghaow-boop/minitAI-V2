@@ -782,6 +782,25 @@ check("Previous minutes keep the discussion", "Diluluskan" in _txt)
 check("Previous minutes drop the empty signature block",
       "Disediakan" not in _txt)
 
+
+# ------------------------------------------ the old minutes are background
+# The first real run of Perkara Berbangkit carried the previous meeting's
+# TWO action items straight into the new meeting's action list, and titled
+# the meeting "Perkara Berbangkit: Pelantikan Pemeriksa Luar dan Dalam" after
+# its own first matter arising. Last month's file is context, not content.
+_pp = A.cloud.build_prompt if hasattr(A.cloud, "build_prompt") else None
+import inspect as _i
+_csrc = _i.getsource(A.cloud)
+_prevblock = _csrc[_csrc.find("LAST MEETING'S MINUTES"):][:2200]
+check("Old minutes are labelled background only",
+      "BACKGROUND ONLY" in _prevblock)
+check("Old actions must not become new actions",
+      "copy an action out of the old minutes" in _prevblock)
+check("The meeting is not titled after a matter arising",
+      "never begin the title" in _prevblock)
+check("Attendance is this meeting's, not last month's",
+      "only people present at THIS meeting" in _prevblock)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.
