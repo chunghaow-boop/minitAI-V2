@@ -243,6 +243,11 @@ _missing = sorted(u for u in _hosts
                   if not any(a.replace("*.", "") in u for a in _allowed))
 check("No page URL is missing from the CSP: " + (", ".join(_missing) or "none"),
       not _missing)
+_d = client().get("/desktop")
+check("Desktop download redirects", _d.status_code == 302
+      and "github.com" in (_d.headers.get("Location") or ""))
+check("The page offers the desktop version",
+      'href="/desktop"' in h.data.decode())
 hp = client().get("/health").get_json()
 check("Health endpoint works", hp.get("ok") is True)
 check("Health endpoint leaks no secrets",

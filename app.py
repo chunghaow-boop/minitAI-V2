@@ -34,7 +34,7 @@ import tempfile
 import threading
 
 from flask import (Flask, request, jsonify, send_file, session,
-                   render_template_string, abort)
+                   render_template_string, abort, redirect)
 
 # --- shared engine --------------------------------------------------------
 # watch_and_run.py and cloud.py live beside this file. They are copies of the
@@ -603,6 +603,19 @@ def _too_big(e):
         f"30 MB, while an hour of video can be over a gigabyte."}), 413
 
 
+# The desktop build lives on a GitHub release, not in this image - it would
+# otherwise be baked into every deploy for the few people who ever want it.
+# Kept behind our own URL so renaming the repository does not break the link
+# anyone has already shared: set MINITAI_DESKTOP_URL and nothing else changes.
+DESKTOP_URL = (os.environ.get("MINITAI_DESKTOP_URL") or
+               "https://github.com/chunghaow-boop/minitAI-V2/releases/latest")
+
+
+@app.route("/desktop")
+def desktop():
+    return redirect(DESKTOP_URL, code=302)
+
+
 @app.route("/health")
 def health():
     """For the host's uptime check. Reveals nothing about users."""
@@ -1074,26 +1087,57 @@ PAGE = """<!DOCTYPE html><html lang="en"><head>
 --f:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif;
 --fd:'Segoe UI Variable Display','Segoe UI Semibold','Segoe UI',system-ui,Arial,sans-serif;}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font-family:var(--f);min-height:100vh;
-padding:20px;display:flex;justify-content:center}
+/* The glow is two soft lights behind the page. It costs nothing to paint and
+   it is the difference between "a form" and "somewhere worth being". */
+body{color:var(--txt);font-family:var(--f);min-height:100vh;
+/* The last line of the page must clear the floating help robot, which is
+   60px tall and sits 18px from the bottom. On a phone it was sitting on top
+   of the privacy notice. */
+padding:26px 20px 104px;display:flex;justify-content:center;
+background:
+  radial-gradient(48rem 32rem at 10% -14%, #1C2950 0%, transparent 58%),
+  radial-gradient(42rem 28rem at 94% 2%, #2A2049 0%, transparent 54%),
+  var(--bg);
+background-attachment:fixed}
 .wrap{width:100%;max-width:620px}
-h1{font-family:var(--fd);font-size:26px;letter-spacing:-.5px;margin-bottom:4px}
-.sub{color:var(--muted);font-size:14px;margin-bottom:24px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:16px}
+h1{font-family:var(--fd);font-size:30px;letter-spacing:-.7px;margin-bottom:5px;
+line-height:1.15}
+h1 .brand{background:linear-gradient(96deg,#F2F6FF 0%,#A9C6FF 52%,#9C8CF8 100%);
+-webkit-background-clip:text;background-clip:text;
+-webkit-text-fill-color:transparent;color:transparent}
+.sub{color:var(--muted);font-size:14px;margin-bottom:22px}
+.card{background:linear-gradient(180deg,#182031 0%,#141A2A 100%);
+border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:16px;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.045), 0 14px 34px rgba(0,0,0,.38)}
 label{display:block;font-size:13px;color:var(--muted);margin:12px 0 6px}
 input,select{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);
-border-radius:10px;padding:12px;font-size:15px;font-family:var(--f)}
-button{width:100%;background:var(--blue);color:#fff;border:0;border-radius:11px;
-padding:14px;font-size:15px;font-weight:600;font-family:var(--f);cursor:pointer;margin-top:14px}
-button:disabled{opacity:.5;cursor:not-allowed}
+border-radius:10px;padding:12px;font-size:15px;font-family:var(--f);
+transition:border-color .15s, box-shadow .15s}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue);
+box-shadow:0 0 0 3px rgba(76,130,247,.17)}
+button{width:100%;background:linear-gradient(180deg,#5B8CFF 0%,#3D6FE8 100%);
+color:#fff;border:0;border-radius:11px;
+padding:14px;font-size:15px;font-weight:600;font-family:var(--f);cursor:pointer;margin-top:14px;
+box-shadow:0 6px 16px rgba(61,111,232,.26);
+transition:transform .14s, box-shadow .14s, filter .14s}
+button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.07);
+box-shadow:0 10px 22px rgba(61,111,232,.34)}
+button:active:not(:disabled){transform:translateY(0);box-shadow:0 4px 12px rgba(61,111,232,.3)}
+/* A disabled button should recede, not shout. The gradient at 45% opacity was
+   still the loudest thing on the screen. */
+button:disabled{background:var(--card2);color:var(--muted);border:1px solid var(--line);
+cursor:not-allowed;box-shadow:none;font-weight:500}
 #drop{border:2px dashed var(--line);border-radius:12px;padding:34px 16px;text-align:center;
-color:var(--muted);cursor:pointer;font-size:14px}
-#drop.on{border-color:var(--blue);color:var(--txt)}
+color:var(--muted);cursor:pointer;font-size:14px;
+transition:border-color .15s, color .15s, background .15s}
+#drop:hover{border-color:#3A4A6E;color:#B7C1D6}
+#drop.on{border-color:var(--blue);color:var(--txt);background:rgba(76,130,247,.06)}
 .bar{height:6px;background:var(--card2);border-radius:6px;overflow:hidden;margin-top:14px}
 .bar>i{display:block;height:100%;width:0;background:var(--blue);transition:width .4s}
 a.file{display:block;background:var(--card2);border:1px solid var(--line);border-radius:10px;
-padding:13px;margin-top:9px;color:var(--txt);text-decoration:none;font-size:14px}
-a.file:hover{border-color:var(--blue)}
+padding:13px;margin-top:9px;color:var(--txt);text-decoration:none;font-size:14px;
+transition:border-color .15s, transform .15s, background .15s}
+a.file:hover{border-color:var(--blue);transform:translateX(2px);background:#1E2740}
 .msg{font-size:13px;margin-top:12px;line-height:1.5}
 .err{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
 .note{font-size:12px;color:var(--muted);line-height:1.6;margin-top:14px}
@@ -1101,7 +1145,8 @@ a.file:hover{border-color:var(--blue)}
 /* --- live recording --- */
 #recBar{display:flex;gap:9px}
 button.rec{background:var(--card2);border:1px solid var(--line);color:var(--txt);
-font-size:13px;padding:11px 8px;border-radius:10px}
+font-size:13px;padding:11px 8px;border-radius:10px;box-shadow:none}
+button.rec:hover:not(:disabled){box-shadow:0 6px 16px rgba(0,0,0,.3);filter:none}
 button.rec.big{flex:1;padding:18px 10px;font-size:14px;font-weight:600;
 display:flex;flex-direction:column;align-items:center;gap:7px;
 background:linear-gradient(165deg,#232a3d,#1b2130);border-color:#33405c}
@@ -1151,8 +1196,11 @@ max-width:32ch}
 border:1px solid var(--line);border-radius:999px;padding:5px 10px}
 #code:focus{outline:none;border-color:var(--blue);
 box-shadow:0 0 0 3px rgba(74,110,224,.18)}
+#appCard{animation:rise .45s cubic-bezier(.2,.8,.2,1) both}
 @media (prefers-reduced-motion:reduce){
-  #helloBody,#helloEyes,#helloArm,#helloTip,#loginCard,#botBob{animation:none}}
+  #helloBody,#helloEyes,#helloArm,#helloTip,#loginCard,#botBob,#appCard,
+  #micGate,#recDot{animation:none}
+  button:hover:not(:disabled),a.file:hover{transform:none}}
 /* --- the microphone gate --- */
 #micGate{text-align:center;padding:22px 16px;background:var(--card2);
 border:1px solid var(--line);border-radius:14px;margin-bottom:16px;
@@ -1171,7 +1219,8 @@ font-size:13px;margin-bottom:7px;gap:8px}
 #quotaOf{color:var(--muted);font-size:12px;white-space:nowrap}
 .qbar{height:6px;background:#171b26;border-radius:6px;overflow:hidden}
 .qreset{font-size:11px;color:var(--muted);margin-top:7px}
-.qbar>i{display:block;height:100%;width:0;background:var(--blue);
+.qbar>i{display:block;height:100%;width:0;
+background:linear-gradient(90deg,#4C82F7 0%,#7C6CF7 100%);
 transition:width .5s ease}
 #quotaChip.low .qbar>i{background:#FBBF24}
 #quotaChip.out .qbar>i{background:var(--red)}
@@ -1235,7 +1284,8 @@ font-size:13px;padding:8px;font-family:inherit;margin-bottom:6px}
 #editForm h4{font-size:12px;color:var(--muted);margin:16px 0 2px;
 text-transform:uppercase;letter-spacing:.4px}
 </style></head><body><div class="wrap">
-<h1>MinitAI<span id="h1name" style="font-weight:400;color:var(--muted)"></span></h1>
+<h1><span class="brand">MinitAI</span><span id="h1name"
+  style="font-weight:400;color:var(--muted)"></span></h1>
 <div class="sub">Meeting audio in. Professional minutes out.</div>
 
 <div class="card {{ 'hide' if signed_in else '' }}" id="loginCard">
@@ -1460,6 +1510,9 @@ text-transform:uppercase;letter-spacing:.4px}
   <div class="note">Audio goes to <b>Groq in the United States</b> to be
     transcribed. Not for confidential meetings.
     <a href="#" id="privLink" style="color:var(--muted)">Privacy and your data</a></div>
+  <div class="note">Confidential meeting, or out of allowance?
+    <a href="/desktop" id="deskLink" style="color:var(--blue)">Get MinitAI for
+    Windows</a> &mdash; runs entirely on your own machine, no limit.</div>
   <div id="priv" class="hide">
     <div class="note">Sending your recording to Groq is a transfer outside
       Malaysia &mdash; by uploading you agree to it, and you should have
@@ -2530,7 +2583,10 @@ async function loadMe(){const {j}=await api('/me');
       ? left+' min of recording left today'
       : 'No recording time left today';
     $('quotaOf').textContent = used+' / '+cap+' used';
-    $('quotaFill').style.width = (cap? Math.min(100, used*100/cap) : 0)+'%';
+    // The bar shows what is LEFT, not what is spent - it drains as the day
+    // goes on. A full-width bar on a fresh morning reads as "plenty"; the old
+    // way showed an empty track that looked like something had failed to load.
+    $('quotaFill').style.width = (cap? Math.max(0, left*100/cap) : 0)+'%';
     if(left<=0) chip.classList.add('out');
     else if(left<=Math.max(10, cap*0.15)) chip.classList.add('low');
     quotaResetAt = j.quota_resets_at || 0;
