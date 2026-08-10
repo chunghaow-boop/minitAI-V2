@@ -858,6 +858,27 @@ check("The wait shows the document being built",
 check("The form gets out of the way while it works",
       "showing-work" in _pg)
 
+
+# ------------------------------------------- teaching it the right spelling
+# Three separate real meetings came back with "Senat" as "seratisis" and
+# "Pasca Siswazah" as "PASCASIS OZAR". The names box that fixes this already
+# existed and already reached the decoder before it starts listening - but it
+# is an empty field in a collapsed panel, asked for before anyone knows they
+# will need it. It is now offered at the moment the wrong spelling is on the
+# screen, corrects the document in place through the free rebuild, and keeps
+# the spelling for the next recording.
+_p2 = client().get("/").data.decode()
+check("Names can be corrected where the mistake is visible",
+      'id="fixNames"' in _p2 and "Did it spell the names right?" in _p2)
+check("A correction rebuilds the document rather than only the next one",
+      "'/regenerate'" in _p2 and "fixApply(lastAnalysis" in _p2)
+check("The corrected spelling is kept for the next recording",
+      "function fixRemember" in _p2 and "minitai.hints" in _p2)
+check("Rebuilding keeps the transcript in the download list",
+      "if(!(k in merged)) merged[k]=was[k]" in _p2)
+check("The correction reaches the decoder, not just the summariser",
+      "before transcription" in open("app.py", encoding="utf-8").read())
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.

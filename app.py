@@ -1369,16 +1369,17 @@ list-style:none}
   line-height:1.35;margin:4px 0 2px;color:var(--txt)}
 #appCard.showing-result #msg.ok:before{content:'✓  ';color:var(--green)}
 #appCard.showing-result #preview{order:2}
-#appCard.showing-result #editOpen{order:3}
-#appCard.showing-result #files{order:4}
-#appCard.showing-result .note{order:5}
-#appCard.showing-result #shareRow{order:5}
-#appCard.showing-result #driveWrap{order:6}
-#appCard.showing-result #drivePast{order:7}
-#appCard.showing-result #newMeeting{display:block;order:8;margin:18px 0 0;
+#appCard.showing-result #fixNames{order:3;margin-top:14px}
+#appCard.showing-result #editOpen{order:4}
+#appCard.showing-result #files{order:5}
+#appCard.showing-result .note{order:6}
+#appCard.showing-result #shareRow{order:6}
+#appCard.showing-result #driveWrap{order:7}
+#appCard.showing-result #drivePast{order:8}
+#appCard.showing-result #newMeeting{display:block;order:9;margin:18px 0 0;
   background:var(--card2);font-size:14px;padding:14px}
-#appCard.showing-result #recentWrap{order:9}
-#appCard.showing-result #cardFoot{order:10}
+#appCard.showing-result #recentWrap{order:10}
+#appCard.showing-result #cardFoot{order:11}
 /* The Word document is what almost everyone came for; the other two are
    there for the person who wants them. */
 #files a.file:first-child{background:linear-gradient(180deg,#22304d,#1B2438);
@@ -1622,6 +1623,24 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
 
   <div id="preview" class="hide"></div>
+  <!-- The names box already works, and already reaches the decoder before it
+       starts listening. Nobody ever finds it: it is an empty field inside a
+       collapsed panel, asked for before anyone knows they will need it. The
+       moment that works is this one - the wrong spelling is on the screen. -->
+  <div id="fixNames" class="hide">
+    <label style="margin-top:4px">Did it spell the names right?</label>
+    <div class="note" style="margin:0 0 8px">Type what it wrote and what it
+      should say. This document is rebuilt straight away and costs nothing, and
+      every future meeting is told the correct spelling <b>before</b> it starts
+      listening - which is what actually fixes it.</div>
+    <div id="fixRows"></div>
+    <button type="button" class="rec" id="fixAdd"
+            style="width:100%;font-size:13px;padding:9px">Another name</button>
+    <button type="button" class="rec" id="fixGo"
+            style="width:100%;margin-top:8px">Fix and rebuild</button>
+    <div class="note hide" id="fixOut"></div>
+  </div>
+
   <div id="files"></div>
 
   <div id="recentWrap" class="hide">
@@ -2340,6 +2359,45 @@ $('recPause').onclick=function(){
     $('recPause').textContent='Resume'; $('recDot').style.animationPlayState='paused';
   }
 };
+$('fixAdd').onclick=function(){ fixRow(); };
+$('fixGo').onclick=async function(){
+  var pairs=fixPairs();
+  var out=$('fixOut'); out.classList.remove('hide');
+  if(!pairs.length){ out.textContent='Fill in both sides of at least one line.'; return; }
+  if(!lastAnalysis){ out.textContent='Nothing to rebuild.'; return; }
+  var btn=this; btn.disabled=true; btn.textContent='Rebuilding\u2026';
+  var kept=fixRemember(pairs);
+  try{
+    var fixed=fixApply(lastAnalysis,pairs);
+    const {ok,j}=await api('/regenerate',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({analysis:fixed})});
+    if(!ok) throw new Error((j&&j.error)||'Rebuild failed.');
+    lastAnalysis=fixed; showPreview(fixed);
+    // /regenerate returns the two documents it rebuilt. The transcript is the
+    // raw record and is deliberately not rewritten - but it must not vanish
+    // from the download list just because the names were corrected.
+    // Rebuild the list in a fixed order: the Word document is the thing
+    // people came for and is styled as the primary download, which keys off
+    // being first. Merging blindly put the transcript at the top.
+    var was=driveFiles||{}, merged={};
+    ['docx','pptx','transcript'].forEach(function(k){
+      var v=(j.files&&j.files[k])||was[k];
+      if(v) merged[k]=v;
+    });
+    for(var k in was) if(!(k in merged)) merged[k]=was[k];
+    renderFiles(merged,false); driveFiles=merged;
+    $('fixRows').innerHTML=''; fixRow();
+    out.textContent='Rebuilt with '+pairs.length+' correction'
+      +(pairs.length===1?'':'s')+'. '
+      +(kept? kept+' spelling'+(kept===1?'':'s')+' saved - the next recording is '
+        +'told before it starts listening.' : '');
+  }catch(e){
+    out.textContent=e.message||'Could not rebuild.';
+  }
+  btn.disabled=false; btn.textContent='Fix and rebuild';
+};
+
 $('recStop').onclick=recStopNow;
 
 // Bring the form back. The documents stay on screen underneath - losing them
@@ -2347,6 +2405,7 @@ $('recStop').onclick=recStopNow;
 $('newMeeting').onclick=function(){
   $('appCard').classList.remove('showing-result');
   $('newMeeting').classList.add('hide');
+  $('fixNames').classList.add('hide');
   $('msg').textContent=''; $('msg').className='msg';
   $('drop').scrollIntoView({behavior:'smooth', block:'center'});
 };
@@ -2459,7 +2518,12 @@ async function check(id,noAuto){
       if($('driveAuto').checked) driveSave(driveFiles, true);
     }
     lastAnalysis = j.analysis || null;
-    if(lastAnalysis){ $('editOpen').classList.remove('hide'); showPreview(lastAnalysis); }
+    if(lastAnalysis){
+      $('editOpen').classList.remove('hide'); showPreview(lastAnalysis);
+      $('fixNames').classList.remove('hide');
+      if(!document.querySelector('#fixRows .fixRow')) fixRow();
+      $('fixOut').classList.add('hide');
+    }
     // Put the result where the eye already is, instead of below the form.
     $('appCard').classList.add('showing-result');
     $('newMeeting').classList.remove('hide');
@@ -2479,6 +2543,72 @@ async function check(id,noAuto){
     writing:'Writing the Word document'};
   if($('buildNow')) $('buildNow').textContent=FOOT[j.state]||'Working';
 }
+// --- correcting the names ------------------------------------------------
+// Whisper hears "Senat" as "seratisis" and no amount of tidying afterwards
+// teaches it otherwise. Give it the word up front and it simply picks the
+// spelling it was handed - which is why the right-hand side of every pair is
+// kept and sent with the next recording.
+function fixRow(a,b){
+  var row=document.createElement('div');
+  row.className='fixRow';
+  row.style.cssText='display:flex;gap:8px;align-items:center;margin-bottom:8px';
+  var w=document.createElement('input');
+  w.placeholder='what it wrote'; w.value=a||'';
+  var arrow=document.createElement('span');
+  arrow.textContent='\u2192'; arrow.style.cssText='color:var(--muted);flex:none';
+  var r=document.createElement('input');
+  r.placeholder='what it should say'; r.value=b||'';
+  [w,r].forEach(function(i){
+    i.style.cssText='flex:1 1 0;min-width:0;background:var(--card2);'
+      +'border:1px solid var(--line);border-radius:9px;color:var(--txt);'
+      +'font-size:13px;padding:9px;margin:0';
+  });
+  row.appendChild(w); row.appendChild(arrow); row.appendChild(r);
+  $('fixRows').appendChild(row);
+  return row;
+}
+function fixPairs(){
+  var out=[];
+  Array.prototype.forEach.call(document.querySelectorAll('#fixRows .fixRow'),
+    function(row){
+      var i=row.querySelectorAll('input');
+      var a=(i[0].value||'').trim(), b=(i[1].value||'').trim();
+      if(a && b && a!==b) out.push([a,b]);
+    });
+  return out;
+}
+// Replace in every string the document will print, however deep.
+function fixApply(node, pairs){
+  if(typeof node==='string'){
+    pairs.forEach(function(p){
+      var esc=p[0].replace(/[^A-Za-z0-9 ]/g,function(c){return '\\\\'+c;});
+      node=node.replace(new RegExp(esc,'gi'), p[1]);
+    });
+    return node;
+  }
+  if(Array.isArray(node)) return node.map(function(x){ return fixApply(x,pairs); });
+  if(node && typeof node==='object'){
+    var o={};
+    for(var k in node) o[k]=fixApply(node[k],pairs);
+    return o;
+  }
+  return node;
+}
+// Keep the correct spellings for next time, without losing what is there.
+function fixRemember(pairs){
+  var box=$('hints'), have=(box && box.value ? box.value : '');
+  var known=have.split(',').map(function(x){ return x.trim().toLowerCase(); });
+  var added=[];
+  pairs.forEach(function(p){
+    if(known.indexOf(p[1].toLowerCase())<0){ added.push(p[1]); known.push(p[1].toLowerCase()); }
+  });
+  if(!added.length) return 0;
+  var next=(have ? have+', ' : '')+added.join(', ');
+  if(box) box.value=next.slice(0,400);
+  try{ localStorage.setItem('minitai.hints', next.slice(0,400)); }catch(e){}
+  return added.length;
+}
+
 var lastAnalysis=null;
 var FILE_LABEL={docx:'Word document (.docx)',pptx:'Slides (.pptx)',
                 transcript:'Full transcript (.txt)'};
