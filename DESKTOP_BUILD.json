@@ -1,0 +1,6 @@
+{
+  "watch_and_run.py": "f5a04ad5c62d1a40f9a962a867bc84e0a17239153a43396ae512320e3e2f08cc",
+  "cloud.py": "3936a2c5dbfcbafb9a701fe8b7e583b8b80acf46ec4ab06baf74aafd2682cb4b",
+  "_note": "Hashes of the engine files inside the published desktop zip. When these stop matching the repository, the desktop download is out of date and the zip needs rebuilding and re-releasing.",
+  "release": "v1.8.3"
+}

@@ -737,6 +737,49 @@ finally:
 _pg4 = client().get("/").data.decode()
 check("The focus box is in the UI", 'id="focus"' in _pg4)
 check("The focus box is sent to the server", "fd.append('focus'" in _pg4)
+# ------------------------------------------------- allowance survives a wipe
+# The host erases /tmp every time the instance sleeps or redeploys, which used
+# to hand everybody a fresh 240 minutes several times a day.
+_uid_w = A._user_id_for("wipe-probe-user")
+A.check_and_add_quota(_uid_w, 50)
+_ck = A._sign_quota(A._quota_day(), 50)
+os.remove(A._quota_path(_uid_w))
+check("Wiped disk alone resets the allowance (why the cookie exists)",
+      A.check_and_add_quota(_uid_w, 10)[1] == 10)
+os.remove(A._quota_path(_uid_w))
+check("The browser's signed copy restores it",
+      A.check_and_add_quota(_uid_w, 10, floor=50)[1] == 60)
+check("A forged allowance cookie is refused",
+      A._sign_quota("2026-01-01", 5) != "2026-01-01|5|deadbeefdeadbeefdeadbeefdeadbeef")
+check("Yesterday's cookie does not carry over",
+      "2000-01-01" not in A._sign_quota(A._quota_day(), 1))
+check("Upload hands the browser a signed allowance cookie",
+      "QUOTA_COOKIE" in open("app.py").read()
+      and "set_cookie(QUOTA_COOKIE" in open("app.py").read())
+
+# ---------------------------------------------------- desktop package drift
+# The desktop zip carries its own copy of the engine. It has silently fallen
+# two generations behind the website twice now, and nothing caught it - the
+# only symptom was a friend getting worse minutes than the website gives.
+# DESKTOP_BUILD.json records what was actually published; if the engine here
+# has moved on, the download needs rebuilding.
+import hashlib as _hl, json as _js
+try:
+    _built = _js.load(open("DESKTOP_BUILD.json"))
+except Exception:
+    _built = None
+check("Desktop build manifest exists", _built is not None)
+if _built:
+    _stale = []
+    for _f in ("watch_and_run.py", "cloud.py"):
+        _now = _hl.sha256(open(_f, "rb").read()).hexdigest()
+        if _now != _built.get(_f):
+            _stale.append(_f)
+    check("Desktop download matches this engine"
+          + (" - REBUILD THE ZIP: " + ", ".join(_stale) if _stale else ""),
+          not _stale)
+
+
 
 print("\n" + "=" * 46)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")

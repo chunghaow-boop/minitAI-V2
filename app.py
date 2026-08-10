@@ -340,6 +340,18 @@ def _run_job(job_id):
         else:
             _set(job_id, state="transcribing", progress=0)
             dur = engine.get_audio_duration(audio_path)
+            # Decoding the whole file is too slow to do while the browser
+            # waits, so it happens here instead - the worker already refunds
+            # anything it raises on.
+            broken = engine.audio_is_truncated(audio_path)
+            if broken:
+                claimed, real = broken
+                raise RuntimeError(
+                    f"Damaged recording: it says it is {int(claimed / 60)} "
+                    f"minutes long but only {int(real)} seconds of it can be "
+                    f"played, so most of the meeting is missing. It was "
+                    f"probably damaged when it was copied or trimmed - send "
+                    f"the original file and it will work.")
 
             def prog(i, n):
                 _set(job_id, progress=int(i * 90 / max(1, n)))
@@ -501,11 +513,11 @@ def _service_quota_locked(minutes):
 _quota_lock = threading.Lock()
 
 
-def check_and_add_quota(uid, minutes):
+def check_and_add_quota(uid, minutes, floor=0):
     """Serialised: gunicorn runs 8 request threads, so two simultaneous uploads
     could otherwise both read the old total and one would overwrite the other."""
     with _quota_lock:
-        ok, used = _check_and_add_quota_locked(uid, minutes)
+        ok, used = _check_and_add_quota_locked(uid, minutes, floor)
         if not ok:
             return False, used
         svc_ok, _svc = _service_quota_locked(minutes)
@@ -526,7 +538,37 @@ def _refund_quota_locked(uid, minutes):
         pass
 
 
-def _check_and_add_quota_locked(uid, minutes):
+QUOTA_COOKIE = "minitai_q"
+
+
+def _sign_quota(day, minutes):
+    payload = f"{day}|{int(minutes)}"
+    sig = hmac.new(_SECRET.encode(), payload.encode(),
+                   hashlib.sha256).hexdigest()[:32]
+    return f"{payload}|{sig}"
+
+
+def _read_quota_cookie():
+    """Minutes the browser says were used today, or 0.
+
+    The counters live on a disk the host erases every time the instance
+    sleeps, restarts or redeploys - so the daily allowance quietly resets
+    several times a day and the shared Groq account is the thing at risk.
+    A copy signed into the visitor's own cookie survives all of that. It is
+    only ever used to RECOVER a wiped counter, never to override a live one,
+    so a refund still works and clearing cookies is the worst anyone can do.
+    """
+    raw = request.cookies.get(QUOTA_COOKIE) or ""
+    try:
+        day, mins, sig = raw.split("|")
+        if not hmac.compare_digest(_sign_quota(day, mins), raw):
+            return 0
+        return int(mins) if day == _quota_day() else 0
+    except Exception:
+        return 0
+
+
+def _check_and_add_quota_locked(uid, minutes, floor=0):
     today = _quota_day()
     p = _quota_path(uid)
     try:
@@ -534,7 +576,9 @@ def _check_and_add_quota_locked(uid, minutes):
     except Exception:
         d = {}
     if d.get("day") != today:
-        d = {"day": today, "minutes": 0}
+        # No record for today: either a genuinely new day, or the disk was
+        # wiped. The browser's signed copy tells us which.
+        d = {"day": today, "minutes": max(0, int(floor or 0))}
     if d["minutes"] + minutes > MAX_MINUTES_PER_USER_PER_DAY:
         return False, d["minutes"]
     d["minutes"] += minutes
@@ -586,7 +630,7 @@ def _headers(r):
         "script-src 'self' 'unsafe-inline' https://accounts.google.com "
         "https://apis.google.com https://ssl.gstatic.com "
         "https://www.gstatic.com; "
-        "connect-src 'self' https://accounts.google.com "
+        "connect-src 'self' blob: https://accounts.google.com "
         "https://oauth2.googleapis.com https://www.googleapis.com; "
         "frame-src https://accounts.google.com https://content.googleapis.com; "
         "img-src 'self' data: https://*.googleusercontent.com "
@@ -717,7 +761,8 @@ def upload():
             f"Split it into two halves and upload them separately - the "
             f"minutes for each half will still be complete."}), 413
 
-    ok, used = check_and_add_quota(uid, 1 if is_doc else (int(dur / 60) or 1))
+    ok, used = check_and_add_quota(uid, 1 if is_doc else (int(dur / 60) or 1),
+                                   floor=_read_quota_cookie())
     if ok == "service":
         os.remove(path)
         return jsonify({"error":
@@ -756,9 +801,14 @@ def upload():
     mins = int(dur / 60)
     # Roughly a quarter of real time end to end, plus a floor for short files.
     eta = max(1, round(mins / 4)) if mins else 1
-    return jsonify({"job": job_id, "queued_ahead": max(0, _work.qsize() - 1),
+    resp = jsonify({"job": job_id, "queued_ahead": max(0, _work.qsize() - 1),
                     "minutes": mins, "eta_minutes": eta,
                     "long": mins >= LONG_MEETING_WARN_MINUTES})
+    # The browser now carries a signed copy of today's total, so a server
+    # restart cannot hand everybody a fresh allowance.
+    resp.set_cookie(QUOTA_COOKIE, _sign_quota(_quota_day(), used),
+                    max_age=172800, samesite="Lax", secure=True, httponly=True)
+    return resp
 
 
 @app.route("/job/<job_id>")

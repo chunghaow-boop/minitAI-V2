@@ -394,6 +394,44 @@ def get_audio_duration(path):
     return None
 
 
+def audio_is_truncated(path):
+    """How much of a recording can actually be decoded, when the header and the
+    audio disagree.
+
+    Returns (header_seconds, decoded_seconds) or None when there is nothing to
+    worry about. A file copied out of a longer recording without re-encoding
+    keeps the original header but loses most of its audio: ffmpeg reports
+    twelve minutes and then decodes eight seconds of it. Whisper duly invents a
+    sentence, the summariser duly writes minutes about it, and the person gets
+    a confident document describing a meeting that was never transcribed.
+    Catching it here means we can say so instead.
+    """
+    import subprocess as _sp, re as _re
+    def _probe(args):
+        try:
+            p = _sp.run([_ffmpeg_exe()] + args, capture_output=True,
+                        text=True, timeout=300)
+            return p.stderr or ""
+        except Exception:
+            return ""
+    head = _re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", _probe(["-i", path]))
+    if not head:
+        return None
+    claimed = (int(head.group(1)) * 3600 + int(head.group(2)) * 60
+               + float(head.group(3)))
+    hits = _re.findall(r"time=\s*(\d+):(\d+):(\d+\.?\d*)",
+                       _probe(["-i", path, "-f", "null", "-"]))
+    if not hits:
+        return None
+    h, mi, s = hits[-1]
+    real = int(h) * 3600 + int(mi) * 60 + float(s)
+    # Generous: only complain when a third of the recording is missing AND the
+    # gap is more than half a minute, so ordinary header rounding never trips.
+    if claimed - real > 30 and real < claimed * 0.67:
+        return (claimed, real)
+    return None
+
+
 def split_audio(path, out_dir, seconds=SEGMENT_SECONDS):
     """Split an audio/video file into ~`seconds`-long WAV chunks (16kHz mono, what
     Whisper wants). Returns an ordered list of chunk paths.
@@ -1396,6 +1434,19 @@ def normalise_analysis(data):
 
     for f in ("meeting_title", "date", "time", "location"):
         data[f] = _as_text(data.get(f)).strip()
+
+    # A blank title is not harmless: it names the file, heads the document and
+    # is what gets shared on WhatsApp. A real 3-minute meeting came back with
+    # no title at all, so everything downstream said "Minit Mesyuarat" or, in
+    # one case, "Done". Borrow the first agenda topic instead of shipping a
+    # blank - it is always more use than nothing.
+    if not data["meeting_title"]:
+        for item in _as_list(data.get("agenda_items")):
+            topic = _as_text(
+                item.get("topic") if isinstance(item, dict) else item).strip()
+            if topic:
+                data["meeting_title"] = topic[:80]
+                break
 
     data["attendees"], _name_warnings = _clean_attendees(
         [_as_text(a).strip() for a in _as_list(data.get("attendees")) if _as_text(a).strip()])
