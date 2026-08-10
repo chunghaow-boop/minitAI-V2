@@ -836,6 +836,28 @@ check("A meeting is not named after a matter arising",
 check("It borrows the first real agenda item instead",
       _d.get("meeting_title", "").startswith("Notis Seratisis"))
 
+
+# --------------------------------------------- a recording survives a crash
+# MediaRecorder flushed every five seconds, but only into a JavaScript array,
+# so a tab crash, a phone killing a backgrounded page or a laptop that never
+# woke up lost the whole meeting rather than five seconds of it. Chunks are
+# written to IndexedDB as they arrive and offered back on the next visit.
+# Verified for real with a browser: record, kill the tab mid-recording,
+# reload, recover the file. These guard the plumbing that made it work.
+_pg = client().get("/").data.decode()
+check("Each chunk is written to storage as it arrives",
+      "recSaveChunk(e.data)" in _pg)
+check("An interrupted recording is offered back on the next visit",
+      "function recOfferRecovery()" in _pg and "recOfferRecovery();" in _pg)
+check("The saved copy is cleared once the recording is safely in hand",
+      _pg.count("recClearSaved()") >= 3)
+check("A disconnected microphone is reported, not recorded as silence",
+      "The microphone disconnected" in _pg)
+check("The wait shows the document being built",
+      "BUILD_PLAN" in _pg and "PERKARA BERBANGKIT" in _pg)
+check("The form gets out of the way while it works",
+      "showing-work" in _pg)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.

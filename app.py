@@ -1317,6 +1317,46 @@ list-style:none}
 #adv>summary::-webkit-details-marker{display:none}
 #adv>summary::after{content:'\u00a0\u25be';float:right}
 #adv[open]>summary::after{content:'\u00a0\u25b4'}
+/* --- the wait --- */
+#build{margin-top:12px}
+#buildDoc{background:#0E1424;border:1px solid var(--line);border-radius:12px;
+  padding:16px 15px;height:210px;overflow:hidden;position:relative}
+#buildDoc:after{content:"";position:absolute;left:0;right:0;bottom:0;height:52px;
+  background:linear-gradient(180deg,transparent,#0E1424)}
+/* The page scrolls under the top edge too - fade it, or a heading looks
+   sliced in half rather than scrolled past. */
+#buildDoc:before{content:"";position:absolute;left:0;right:0;top:0;height:26px;
+  background:linear-gradient(0deg,transparent,#0E1424);z-index:1}
+#buildDoc .dh{font-size:10px;letter-spacing:.13em;color:var(--blue);font-weight:700;
+  margin:12px 0 7px;opacity:0;animation:bFade .5s forwards}
+#buildDoc .dh:first-child{margin-top:0}
+#buildDoc .ln{height:8px;border-radius:99px;background:var(--card2);margin-bottom:7px;
+  transform-origin:left;transform:scaleX(0);
+  animation:bDraw .55s cubic-bezier(.2,.8,.3,1) forwards}
+@keyframes bDraw{to{transform:scaleX(1)}}
+@keyframes bFade{to{opacity:1}}
+#buildFoot{display:flex;align-items:center;gap:9px;margin-top:12px;font-size:13px;
+  color:var(--txt)}
+#buildFoot #buildTime{margin-left:auto;color:var(--muted);font-size:12.5px;
+  font-variant-numeric:tabular-nums}
+.bspin{width:15px;height:15px;border-radius:50%;border:2px solid var(--line);
+  border-top-color:var(--blue);animation:bSpin .8s linear infinite;flex:none}
+@keyframes bSpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  #buildDoc .ln,#buildDoc .dh{animation:none;transform:none;opacity:1}
+  .bspin{animation:none}
+}
+/* While it works, the recorder and the drop zone are dead weight - the same
+   mistake the finished screen used to make. The document being built takes
+   the page, and the stage line under it is the only status text needed. */
+#appCard.showing-work{display:flex;flex-direction:column}
+#appCard.showing-work #inputZone{display:none}
+#appCard.showing-work #quotaChip{order:0}
+#appCard.showing-work #barWrap{order:1;margin-top:6px}
+#appCard.showing-work #build{order:2}
+#appCard.showing-work #msg{display:none}
+#appCard.showing-work #drivePast,#appCard.showing-work #recentWrap{order:8}
+#appCard.showing-work #cardFoot{order:9}
 /* --- after a meeting finishes ---
    The recorder, the language picker and the drop zone used to stay on screen
    above the result, so the documents someone had just waited for sat eight
@@ -1555,6 +1595,14 @@ text-transform:uppercase;letter-spacing:.4px}
   <button id="go" disabled>Choose a recording first</button>
   </div><!-- /inputZone -->
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
+  <!-- Three to five minutes of staring at a bar that does not move is the
+       longest part of using this. Watching the minutes assemble instead makes
+       the wait legible: you can see it is doing the thing you asked for. -->
+  <div id="build" class="hide">
+    <div id="buildDoc"></div>
+    <div id="buildFoot"><span class="bspin"></span><span id="buildNow">Getting started</span>
+      <span id="buildTime">0:00</span></div>
+  </div>
   <div class="msg" id="msg" role="status" aria-live="polite"></div>
   <div id="drivePast" class="hide">
     <label style="margin-top:4px">Your meetings in Google Drive</label>
@@ -1687,7 +1735,8 @@ $('loginBtn').onclick=async()=>{
       org:($('org')||{}).value||''})});
   $('loginBtn').disabled=false;
   if(ok){$('loginMsg').classList.add('hide');$('loginMsg').textContent='';
-    $('loginCard').classList.add('hide');$('appCard').classList.remove('hide');loadMe();resume();}
+    $('loginCard').classList.add('hide');$('appCard').classList.remove('hide');
+    loadMe();resume();recOfferRecovery();}
   else{$('loginMsg').textContent=j.error||'Sign in failed.';$('loginMsg').classList.remove('hide');}
 };
 $('code').addEventListener('keydown',e=>{if(e.key==='Enter')$('loginBtn').click();});
@@ -1742,6 +1791,97 @@ function fmt(s){
   return m+':'+(r<10?'0':'')+r;
 }
 
+// --- surviving a crash ----------------------------------------------------
+// MediaRecorder was already flushing every five seconds, but only into a
+// JavaScript array, so a tab crash, a phone killing a background page or a
+// laptop that never woke up properly lost the whole meeting, not five
+// seconds of it. Every chunk now goes to IndexedDB as it arrives, and an
+// interrupted recording is offered back on the next visit. Nothing here may
+// ever break recording: every call is wrapped, and a failure is silent.
+var REC_DB='minitai-rec', REC_STORE='chunks', REC_FLAG='minitai_rec_active';
+function recDB(){
+  return new Promise(function(res,rej){
+    try{
+      var r=indexedDB.open(REC_DB,1);
+      r.onupgradeneeded=function(){
+        var d=r.result;
+        if(!d.objectStoreNames.contains(REC_STORE))
+          d.createObjectStore(REC_STORE,{autoIncrement:true});
+      };
+      r.onsuccess=function(){ res(r.result); };
+      r.onerror=function(){ rej(r.error); };
+    }catch(e){ rej(e); }
+  });
+}
+function recSaveChunk(blob){
+  recDB().then(function(d){
+    var tx=d.transaction(REC_STORE,'readwrite');
+    tx.objectStore(REC_STORE).add(blob);
+  }).catch(function(){});
+}
+function recClearSaved(){
+  try{ localStorage.removeItem(REC_FLAG); }catch(e){}
+  return recDB().then(function(d){
+    var tx=d.transaction(REC_STORE,'readwrite');
+    tx.objectStore(REC_STORE).clear();
+  }).catch(function(){});
+}
+function recLoadSaved(){
+  return recDB().then(function(d){
+    return new Promise(function(res){
+      var tx=d.transaction(REC_STORE,'readonly');
+      var q=tx.objectStore(REC_STORE).getAll();
+      q.onsuccess=function(){ res(q.result||[]); };
+      q.onerror=function(){ res([]); };
+    });
+  }).catch(function(){ return []; });
+}
+function recMarkActive(mime){
+  try{ localStorage.setItem(REC_FLAG, JSON.stringify(
+    {at:Date.now(), mime:mime||'audio/webm'})); }catch(e){}
+}
+
+// Offer back anything an interrupted recording left behind.
+function recOfferRecovery(){
+  var meta;
+  try{ meta=JSON.parse(localStorage.getItem(REC_FLAG)||'null'); }catch(e){ meta=null; }
+  if(!meta) return;
+  recLoadSaved().then(function(parts){
+    if(!parts.length){ recClearSaved(); return; }
+    var mime=meta.mime||'audio/webm';
+    var blob=new Blob(parts,{type:mime.split(';')[0]});
+    if(blob.size<2048){ recClearSaved(); return; }
+    var ext = mime.indexOf('mp4')>-1 ? '.mp4' : (mime.indexOf('ogg')>-1 ? '.ogg' : '.webm');
+    var when=new Date(meta.at||Date.now());
+    var box=document.createElement('div');
+    box.id='recovBox';
+    box.style.cssText='background:var(--card2);border:1px solid var(--blue);'
+      +'border-radius:12px;padding:14px;margin-bottom:14px';
+    box.innerHTML='<div style="font-weight:600;margin-bottom:4px">'
+      +'A recording was interrupted</div>'
+      +'<div class="note" style="margin:0 0 10px">Started '
+      +when.toLocaleString()+' \\u00b7 '+(blob.size/1048576).toFixed(1)
+      +' MB was saved before the page closed. It is still here.</div>';
+    var use=document.createElement('button');
+    use.type='button'; use.className='rec'; use.style.cssText='width:100%';
+    use.textContent='Use this recording';
+    var bin=document.createElement('button');
+    bin.type='button'; bin.className='rec';
+    bin.style.cssText='width:100%;margin-top:8px;font-size:13px;color:var(--muted)';
+    bin.textContent='Throw it away';
+    use.onclick=function(){
+      pick(new File([blob],'recovered-meeting'+ext,{type:blob.type}));
+      recClearSaved(); box.remove();
+      $('msg').className='msg';
+      $('msg').textContent='Recovered \\u2014 press "Make the minutes".';
+    };
+    bin.onclick=function(){ recClearSaved(); box.remove(); };
+    box.appendChild(use); box.appendChild(bin);
+    var card=$('appCard');
+    if(card) card.insertBefore(box, card.firstChild);
+  });
+}
+
 async function recStartMode(mode){
   if(rec||running) return;
   if(await micState()==='denied'){ micBlocked(); return; }
@@ -1764,6 +1904,18 @@ async function recStartMode(mode){
     var ms=await navigator.mediaDevices.getUserMedia({audio:true});
     recStreams.push(ms);
     ac.createMediaStreamSource(ms).connect(dest);
+    // A bluetooth headset walking out of range, or a USB mic pulled out,
+    // ends the track. The recorder carries on writing perfect silence, and
+    // nobody finds out until the minutes come back empty.
+    ms.getAudioTracks().forEach(function(t){
+      t.onended=function(){
+        if(!rec || rec.state==='inactive') return;
+        $('recHint').textContent='The microphone disconnected. Everything up to '
+          +'now is safe \\u2014 press Stop, or plug it back in and start a second '
+          +'recording for the rest.';
+        $('recHint').style.color='#FBBF24';
+      };
+    });
   }catch(e){
     recCleanup();
     $('msg').className='msg err';
@@ -1800,9 +1952,15 @@ async function recStartMode(mode){
     $('msg').textContent='This browser refused to record: '+(e.message||e.name);
     return;
   }
-  rec.ondataavailable=function(e){ if(e.data && e.data.size) recChunks.push(e.data); };
+  rec.ondataavailable=function(e){
+    if(!e.data || !e.data.size) return;
+    recChunks.push(e.data);
+    recSaveChunk(e.data);   // so a crash costs seconds, not the meeting
+  };
   rec.onstop=recFinish;
-  rec.start(5000);           // flush every 5s so a crash loses seconds, not hours
+  recClearSaved();
+  recMarkActive(rec.mimeType||recMime());
+  rec.start(5000);           // flush every 5s; each flush is written to disk
   if(navigator.wakeLock && navigator.wakeLock.request){
     navigator.wakeLock.request('screen').then(function(l){ recLock=l; },function(){});
   }
@@ -1878,6 +2036,7 @@ function recFinish(){
   }
   var name='meeting-'+fmt(secs).replace(':','m')+'s'+ext;
   pick(new File([blob],name,{type:blob.type}));
+  recClearSaved();           // it is in the page now; the copy has done its job
   $('msg').className='msg';
   $('msg').textContent='Recording ready \\u2014 '+fmt(secs)+'. Press "Make the minutes".';
 }
@@ -2196,7 +2355,7 @@ $('go').onclick=async()=>{
   if(!file||running)return;
   $('go').disabled=true;$('files').innerHTML='';
   $('msg').className='msg';$('msg').textContent='Uploading\\u2026';
-  $('barWrap').classList.remove('hide');$('bar').style.width='4%';
+  $('barWrap').classList.remove('hide');$('bar').style.width='4%'; buildStart();
   const fd=new FormData();fd.append('audio',file);
   fd.append('lang',$('lang').value);fd.append('hints',$('hints').value);
   fd.append('roster',$('roster').value);
@@ -2215,11 +2374,11 @@ $('go').onclick=async()=>{
 // like the original upload.
 function watch(id){
   running=true; clearInterval(poll);
-  $('go').disabled=true; $('barWrap').classList.remove('hide');
+  $('go').disabled=true; $('barWrap').classList.remove('hide'); buildStart();
   poll=setInterval(()=>check(id),2500); check(id);
 }
 function fail(t){clearInterval(poll);running=false;$('msg').className='msg err';$('msg').textContent=t;
-  $('barWrap').classList.add('hide');$('go').disabled=false;
+  $('barWrap').classList.add('hide');$('go').disabled=false; buildStop();
   loadMe();}   // a failed job refunds the minutes; show that straight away
 // Closing the page used to abandon the meeting with no warning at all.
 window.addEventListener('beforeunload',e=>{
@@ -2229,6 +2388,56 @@ window.addEventListener('beforeunload',e=>{
 
 const NICE={queued:'Waiting in the queue\\u2026',transcribing:'Listening to the recording\\u2026',
   summarising:'Writing the summary\\u2026',writing:'Building your documents\\u2026'};
+
+// --- the document, building itself ---------------------------------------
+// The sections are the ones the Word document actually has, in the order it
+// writes them, so what you watch is a rehearsal of what you are about to get.
+var BUILD_PLAN=[
+  ['MESYUARAT',[94,58]],
+  ['KEHADIRAN',[82,74,66]],
+  ['PERKARA BERBANGKIT',[92,86,55]],
+  ['PERKARA DIBINCANGKAN',[96,88,91,78,49]],
+  ['TINDAKAN',[84,71]]
+];
+var buildAt=0, buildTimer=null, buildClock=null, buildT0=0;
+function buildStop(){
+  clearTimeout(buildTimer); clearInterval(buildClock);
+  buildTimer=buildClock=null;
+  $('build').classList.add('hide');
+  $('appCard').classList.remove('showing-work');
+}
+function buildStart(){
+  var doc=$('buildDoc'); doc.innerHTML=''; buildAt=0; buildT0=Date.now();
+  $('build').classList.remove('hide');
+  $('appCard').classList.remove('showing-result');
+  $('appCard').classList.add('showing-work');
+  window.scrollTo({top:0, behavior:'smooth'});
+  $('buildNow').textContent='Getting started';
+  clearInterval(buildClock);
+  buildClock=setInterval(function(){
+    var s=Math.floor((Date.now()-buildT0)/1000);
+    $('buildTime').textContent=fmt(s);
+  },1000);
+  buildStep();
+}
+function buildStep(){
+  var doc=$('buildDoc');
+  if(buildAt>=BUILD_PLAN.length){        // reached the end - start it over
+    buildTimer=setTimeout(function(){ doc.innerHTML=''; buildAt=0; buildStep(); },2400);
+    return;
+  }
+  var sec=BUILD_PLAN[buildAt++], h=document.createElement('div');
+  h.className='dh'; h.textContent=sec[0]; doc.appendChild(h);
+  doc.scrollTop=doc.scrollHeight;
+  var i=0;
+  (function line(){
+    if(i>=sec[1].length){ buildTimer=setTimeout(buildStep,300); return; }
+    var l=document.createElement('div');
+    l.className='ln'; l.style.width=sec[1][i++]+'%';
+    doc.appendChild(l); doc.scrollTop=doc.scrollHeight;
+    buildTimer=setTimeout(line,190);
+  })();
+}
 async function check(id,noAuto){
   const {ok,j,status}=await api('/job/'+id);
   if(status===410){fail(j.error||'That job was lost. Please upload again.');return;}
@@ -2237,7 +2446,7 @@ async function check(id,noAuto){
   if(j.state==='error'){fail(j.error||'Something went wrong.');return;}
   if(j.state==='done'){
     clearInterval(poll); running=false;
-    $('barWrap').classList.add('hide');
+    $('barWrap').classList.add('hide'); buildStop();
     $('msg').className='msg ok';
     // The title is already the heading of the card directly below; repeating
     // it here just made a two-line banner saying the same thing twice.
@@ -2265,6 +2474,10 @@ async function check(id,noAuto){
     $('msg').textContent=j.ahead===1?'Next in line \\u2014 one meeting ahead of yours\\u2026'
       :'Waiting \\u2014 '+j.ahead+' meetings ahead of yours\\u2026'; return;}
   $('msg').textContent=NICE[j.state]||'Working\\u2026';
+  var FOOT={queued:'Waiting for a turn',transcribing:'Listening to the recording',
+    reading:'Reading the document',summarising:'Working out what was decided',
+    writing:'Writing the Word document'};
+  if($('buildNow')) $('buildNow').textContent=FOOT[j.state]||'Working';
 }
 var lastAnalysis=null;
 var FILE_LABEL={docx:'Word document (.docx)',pptx:'Slides (.pptx)',
@@ -2756,7 +2969,7 @@ async function resume(){
 $('signout').onclick=async e=>{e.preventDefault();
   if(running&&!confirm('A meeting is still being processed. Sign out anyway?'))return;
   running=false; await api('/logout',{method:'POST'}); location.reload();};
-if(!$('appCard').classList.contains('hide')){loadMe();resume();}
+if(!$('appCard').classList.contains('hide')){loadMe();resume();recOfferRecovery();}
 </script></div></body></html>"""
 
 
