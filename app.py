@@ -1317,6 +1317,32 @@ list-style:none}
 #adv>summary::-webkit-details-marker{display:none}
 #adv>summary::after{content:'\u00a0\u25be';float:right}
 #adv[open]>summary::after{content:'\u00a0\u25b4'}
+/* --- after a meeting finishes ---
+   The recorder, the language picker and the drop zone used to stay on screen
+   above the result, so the documents someone had just waited for sat eight
+   hundred pixels down the page and they had to scroll past the form they had
+   already used. Once there is a result, the result IS the page. */
+#appCard.showing-result{display:flex;flex-direction:column}
+#appCard.showing-result #inputZone{display:none}
+#appCard.showing-result #quotaChip{order:0}
+#appCard.showing-result #msg{order:1;font-size:17px;font-weight:600;
+  line-height:1.35;margin:4px 0 2px;color:var(--txt)}
+#appCard.showing-result #msg.ok:before{content:'✓  ';color:var(--green)}
+#appCard.showing-result #preview{order:2}
+#appCard.showing-result #editOpen{order:3}
+#appCard.showing-result #files{order:4}
+#appCard.showing-result .note{order:5}
+#appCard.showing-result #shareRow{order:5}
+#appCard.showing-result #driveWrap{order:6}
+#appCard.showing-result #drivePast{order:7}
+#appCard.showing-result #newMeeting{display:block;order:8;margin:18px 0 0;
+  background:var(--card2);font-size:14px;padding:14px}
+#appCard.showing-result #recentWrap{order:9}
+#appCard.showing-result #cardFoot{order:10}
+/* The Word document is what almost everyone came for; the other two are
+   there for the person who wants them. */
+#files a.file:first-child{background:linear-gradient(180deg,#22304d,#1B2438);
+  border-color:#3A4A6E;font-weight:600}
 /* --- what you actually got --- */
 #preview{background:var(--card2);border:1px solid var(--line);border-radius:12px;
 padding:14px;margin-top:12px}
@@ -1435,6 +1461,9 @@ text-transform:uppercase;letter-spacing:.4px}
     <div class="qbar"><i id="quotaFill"></i></div>
     <div class="qreset" id="quotaReset"></div>
   </div>
+  <button type="button" class="rec hide" id="newMeeting">&#43;&nbsp; Start another meeting</button>
+
+  <div id="inputZone">
   <div id="recBar">
     <button type="button" class="rec big" id="recMic">
       <span class="ic">&#9679;</span>Record the room</button>
@@ -1498,7 +1527,8 @@ text-transform:uppercase;letter-spacing:.4px}
 
   <label for="prev">Last meeting's minutes (optional)</label>
   <div class="note" style="margin:0 0 6px">Opens the summary with
-    <b>Perkara Berbangkit</b>. Read once, never kept.</div>
+    <b>Matters Arising</b> &mdash; the unfinished items from last time.
+    Read once, never kept.</div>
   <input id="prev" type="file" accept=".pdf,.docx,.txt,.md"
          style="width:100%;background:var(--card2);border:1px solid var(--line);
                 border-radius:10px;color:var(--muted);font-size:13px;padding:9px">
@@ -1512,8 +1542,8 @@ text-transform:uppercase;letter-spacing:.4px}
   </div>
 
   <label for="roster">Who was there? (optional)</label>
-  <div class="note" style="margin:0 0 6px">One per line. Fills KEHADIRAN and
-    fixes the spelling.</div>
+  <div class="note" style="margin:0 0 6px">One per line. Fills the attendance
+    list and fixes the spelling.</div>
   <textarea id="roster" rows="3"
     placeholder="Dr. Hafizah&#10;Prof. Madya Dr. Maurin&#10;Puan Marja"
     style="width:100%;background:var(--card2);border:1px solid var(--line);
@@ -1523,6 +1553,7 @@ text-transform:uppercase;letter-spacing:.4px}
   </details>
 
   <button id="go" disabled>Choose a recording first</button>
+  </div><!-- /inputZone -->
   <div class="bar hide" id="barWrap"><i id="bar"></i></div>
   <div class="msg" id="msg" role="status" aria-live="polite"></div>
   <div id="drivePast" class="hide">
@@ -1579,7 +1610,7 @@ text-transform:uppercase;letter-spacing:.4px}
     <div class="note" style="margin:0 0 6px">Kept in this browser only, never on
       the server. Clearing your browser data clears these.</div>
     <select id="histPick"></select>
-    <input id="askQ" placeholder="Ask about this meeting, e.g. apa keputusan pasal yuran?"
+    <input id="askQ" placeholder="Ask about this meeting, e.g. what was decided about the fees?"
            style="margin-top:8px">
     <button type="button" class="rec" id="askBtn"
             style="width:100%;margin-top:8px">Ask</button>
@@ -1588,6 +1619,7 @@ text-transform:uppercase;letter-spacing:.4px}
 
 
   </div>
+  <div id="cardFoot">
   <div class="note" style="text-align:right">
     <a href="#" id="signout" style="color:var(--muted)">Sign out</a></div>
   <div class="note">Audio goes to <b>Groq in the United States</b> to be
@@ -1596,6 +1628,7 @@ text-transform:uppercase;letter-spacing:.4px}
   <div class="note">Confidential meeting, or out of allowance?
     <a href="/desktop" id="deskLink" style="color:var(--blue)">Get MinitAI for
     Windows</a> &mdash; runs entirely on your own machine, no limit.</div>
+  </div>
   <div id="priv" class="hide">
     <div class="note">Sending your recording to Groq is a transfer outside
       Malaysia &mdash; by uploading you agree to it, and you should have
@@ -2150,6 +2183,15 @@ $('recPause').onclick=function(){
 };
 $('recStop').onclick=recStopNow;
 
+// Bring the form back. The documents stay on screen underneath - losing them
+// on the way to the next meeting is exactly the complaint that started this.
+$('newMeeting').onclick=function(){
+  $('appCard').classList.remove('showing-result');
+  $('newMeeting').classList.add('hide');
+  $('msg').textContent=''; $('msg').className='msg';
+  $('drop').scrollIntoView({behavior:'smooth', block:'center'});
+};
+
 $('go').onclick=async()=>{
   if(!file||running)return;
   $('go').disabled=true;$('files').innerHTML='';
@@ -2197,7 +2239,9 @@ async function check(id,noAuto){
     clearInterval(poll); running=false;
     $('barWrap').classList.add('hide');
     $('msg').className='msg ok';
-    $('msg').textContent='Done'+(j.title?' \\u2014 '+j.title:'');
+    // The title is already the heading of the card directly below; repeating
+    // it here just made a two-line banner saying the same thing twice.
+    $('msg').textContent='Your minutes are ready';
     renderFiles(j.files, false);   // nothing saves itself; you choose
     driveFiles = j.files;
     if(window.MINITAI_GOOGLE){
@@ -2207,6 +2251,10 @@ async function check(id,noAuto){
     }
     lastAnalysis = j.analysis || null;
     if(lastAnalysis){ $('editOpen').classList.remove('hide'); showPreview(lastAnalysis); }
+    // Put the result where the eye already is, instead of below the form.
+    $('appCard').classList.add('showing-result');
+    $('newMeeting').classList.remove('hide');
+    window.scrollTo({top:0, behavior:'smooth'});
     try{
       var tv=(j.files||{}).transcript;
       if(tv && tv.data) histAdd(j.title, decodeURIComponent(escape(atob(tv.data))));
@@ -2449,13 +2497,13 @@ $('driveAuto').onchange=function(){
 function showPreview(d){
   if(!d){ $('preview').classList.add('hide'); return; }
   var items=d.agenda_items||[], acts=d.action_items||[], att=d.attendees||[];
-  var h='<h3>'+esc(d.meeting_title||'Minit Mesyuarat')+'</h3>';
+  var h='<h3>'+esc(d.meeting_title||'Untitled meeting')+'</h3>';
   var bits=[];
   if(d.date) bits.push(esc(d.date));
   if(d.location) bits.push(esc(d.location));
-  bits.push(items.length+(items.length===1?' perkara':' perkara'));
-  bits.push(acts.length+(acts.length===1?' tindakan':' tindakan'));
-  if(att.length) bits.push(att.length+' hadir');
+  bits.push(items.length+(items.length===1?' item':' items'));
+  bits.push(acts.length+(acts.length===1?' action':' actions'));
+  if(att.length) bits.push(att.length+(att.length===1?' person':' people'));
   h+='<div class="meta">'+bits.join(' &middot; ')+'</div>';
   if(items.length){
     h+='<ol>';
@@ -2487,8 +2535,8 @@ var SHARE_CSS='display:flex;align-items:center;justify-content:center;'
   +'background:var(--card2);border:1px solid var(--line);color:var(--txt);'
   +'font-size:13px;cursor:pointer';
 function shareMsg(title){
-  return encodeURIComponent('Minit mesyuarat: '+title
-    +' \u2014 dokumen Word dilampirkan. (Dijana dengan MinitAI.)');
+  return encodeURIComponent('Minutes: '+title
+    +' \u2014 Word document attached. (Made with MinitAI.)');
 }
 function waLink(title){
   var w=document.createElement('a');
@@ -2503,7 +2551,7 @@ function mailLink(title){
   // Not mailto: - most Windows laptops have no mail client registered, so the
   // link silently does nothing at all. Gmail's web compose always opens.
   m.href='https://mail.google.com/mail/?view=cm&fs=1&su='
-    + encodeURIComponent('Minit mesyuarat: '+title) + '&body=' + shareMsg(title);
+    + encodeURIComponent('Minutes: '+title) + '&body=' + shareMsg(title);
   m.textContent='Send by email';
   return m;
 }
@@ -2525,7 +2573,7 @@ function addShare(files){
   var v=(files||{}).docx; if(!v) return;
   var title=(lastAnalysis && lastAnalysis.meeting_title)
     || ($('msg').textContent||'').replace(/^Done( \u2014 )?/,'').trim()
-    || 'Minit mesyuarat';
+    || 'Untitled meeting';
   var wrap=document.createElement('div'); wrap.id='shareRow';
   wrap.style.cssText='display:flex;gap:9px;margin-top:10px';
   var blob=blobFor(v);
@@ -2567,31 +2615,31 @@ function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;')
 
 function buildEditor(){
   var d=lastAnalysis||{}, h='';
-  h+='<h4>Maklumat mesyuarat</h4>';
-  [['meeting_title','Tajuk'],['date','Tarikh'],['time','Masa'],['location','Tempat']]
+  h+='<h4>Meeting details</h4>';
+  [['meeting_title','Title'],['date','Date'],['time','Time'],['location','Place']]
     .forEach(function(f){
       h+='<div class="n">'+f[1]+'</div><input data-f="'+f[0]+'" value="'+esc(d[f[0]])+'">';
     });
-  h+='<div class="n">Kehadiran (pisahkan dengan koma)</div>'
+  h+='<div class="n">Who was there (separate with commas)</div>'
     +'<input data-f="attendees" value="'+esc((d.attendees||[]).join(', '))+'">';
-  h+='<h4>Perkara dibincangkan</h4>';
+  h+='<h4>What was discussed</h4>';
   (d.agenda_items||[]).forEach(function(it,i){
     h+='<div class="row" data-agenda="'+i+'">'
-      +'<div class="n">'+(i+1)+'.0 Tajuk perkara</div><input data-a="topic" value="'+esc(it.topic)+'">'
-      +'<div class="n">Perbincangan</div><textarea data-a="discussion">'+esc(it.discussion)+'</textarea>'
-      +'<div class="n">Keputusan</div><textarea data-a="decision">'+esc(it.decision)+'</textarea>'
+      +'<div class="n">'+(i+1)+'.0 Topic</div><input data-a="topic" value="'+esc(it.topic)+'">'
+      +'<div class="n">Discussion</div><textarea data-a="discussion">'+esc(it.discussion)+'</textarea>'
+      +'<div class="n">Decision</div><textarea data-a="decision">'+esc(it.decision)+'</textarea>'
       +'</div>';
   });
-  h+='<h4>Tindakan</h4>';
+  h+='<h4>Actions</h4>';
   (d.action_items||[]).forEach(function(it,i){
     h+='<div class="row" data-action="'+i+'">'
-      +'<div class="n">Tindakan</div><input data-t="task" value="'+esc(it.task)+'">'
-      +'<div class="n">Pegawai bertanggungjawab</div><input data-t="owner" value="'+esc(it.owner)+'">'
-      +'<div class="n">Tarikh akhir</div><input data-t="deadline" value="'+esc(it.deadline)+'">'
+      +'<div class="n">What needs doing</div><input data-t="task" value="'+esc(it.task)+'">'
+      +'<div class="n">Who is responsible</div><input data-t="owner" value="'+esc(it.owner)+'">'
+      +'<div class="n">Due</div><input data-t="deadline" value="'+esc(it.deadline)+'">'
       +'</div>';
   });
-  h+='<h4>Catatan penting</h4>'
-    +'<div class="n">Satu baris setiap catatan. Kosongkan baris untuk membuangnya.</div>'
+  h+='<h4>Notes worth keeping</h4>'
+    +'<div class="n">One per line. Clear a line to remove it.</div>'
     +'<textarea data-f="important_notes" style="min-height:90px">'
     +esc((d.important_notes||[]).join('\\n'))+'</textarea>';
   $('editForm').innerHTML=h;

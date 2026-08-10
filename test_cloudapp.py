@@ -738,6 +738,20 @@ _pg4 = client().get("/").data.decode()
 check("The focus box is in the UI", 'id="focus"' in _pg4)
 check("The focus box is sent to the server", "fd.append('focus'" in _pg4)
 
+
+# ------------------------------------------------------- one language on screen
+# The interface used to mix English chrome with Malay labels ("3 perkara",
+# "Kehadiran", "Tajuk"), which reads as unfinished. The interface is English;
+# the language of the DOCUMENTS is the user's choice, and that is separate.
+_ui = client().get("/").data.decode()
+_malay_ui = [w for w in ("perkara", "tindakan", " hadir", "Kehadiran", "Tajuk perkara",
+                         "Perbincangan", "Keputusan</", "Maklumat mesyuarat",
+                         "Catatan penting", "Minit mesyuarat:", "dokumen Word")
+             if w in _ui]
+check("Interface is one language: " + (", ".join(_malay_ui) or "clean"), not _malay_ui)
+check("The user can still choose the document language",
+      'id="lang"' in _ui and 'value="ms"' in _ui)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.
