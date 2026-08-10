@@ -613,6 +613,39 @@ def _reaper():
 threading.Thread(target=_reaper, daemon=True).start()
 
 
+# The host puts a free instance to sleep after fifteen idle minutes. Waking it
+# costs the next visitor about fifty seconds staring at someone else's loading
+# screen, and - worse - wipes the disk holding everyone's daily allowance.
+# A request from outside is what counts as activity, so the instance asks for
+# its own health page. Only during Malaysian waking hours: round the clock
+# would consume nearly all of the 750 free instance-hours in a month, leaving
+# no room for anything else.
+KEEP_WARM = (os.environ.get("MINITAI_KEEP_WARM", "1") or "").strip() != "0"
+WARM_FROM = int(os.environ.get("MINITAI_WARM_FROM", "8"))    # local hour
+WARM_UNTIL = int(os.environ.get("MINITAI_WARM_UNTIL", "23"))
+SELF_URL = (os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
+
+
+def _local_hour():
+    return time.gmtime(time.time() + TZ_OFFSET_HOURS * 3600).tm_hour
+
+
+def _keep_warm():
+    import requests as _rq
+    while True:
+        time.sleep(600)                     # ten minutes, under the fifteen
+        try:
+            if WARM_FROM <= _local_hour() < WARM_UNTIL:
+                _rq.get(SELF_URL + "/health", timeout=30)
+        except Exception:
+            pass                            # a missed ping is not worth a log
+
+
+if KEEP_WARM and SELF_URL.startswith("http"):
+    threading.Thread(target=_keep_warm, daemon=True).start()
+    logging.info(f"keep-warm on {WARM_FROM}:00-{WARM_UNTIL}:00 local")
+
+
 # =========================================================================
 # Routes
 # =========================================================================

@@ -737,6 +737,21 @@ finally:
 _pg4 = client().get("/").data.decode()
 check("The focus box is in the UI", 'id="focus"' in _pg4)
 check("The focus box is sent to the server", "fd.append('focus'" in _pg4)
+
+# ------------------------------------------------------------- keep awake
+# Sleeping is not just a slow first request: it erases the disk that holds
+# everyone's daily allowance, so the instance has to stay up during the day.
+check("Keep-warm pings under the fifteen-minute idle limit",
+      "time.sleep(600)" in open("app.py").read())
+check("Keep-warm only runs during waking hours",
+      A.WARM_FROM == 8 and A.WARM_UNTIL == 23)
+check("Keep-warm stays inside the free monthly hours",
+      (A.WARM_UNTIL - A.WARM_FROM) * 31 < 700)
+check("Keep-warm is off when the host gives us no address",
+      not (os.environ.get("RENDER_EXTERNAL_URL") or ""))
+check("Local hour follows Malaysia, not the server",
+      A.TZ_OFFSET_HOURS == 8)
+
 # ------------------------------------------------- allowance survives a wipe
 # The host erases /tmp every time the instance sleeps or redeploys, which used
 # to hand everybody a fresh 240 minutes several times a day.
