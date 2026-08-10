@@ -18,6 +18,7 @@ import json
 import time
 import logging
 
+import re
 import requests
 
 API_ROOT = "https://api.groq.com/openai/v1"
@@ -350,6 +351,50 @@ def transcribe(audio_path, data_dir, ffmpeg_exe, language=None,
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _norm_task(t):
+    return " ".join(re.findall(r"[\w'-]+", (t or "").lower()))
+
+
+def _drop_echoed_actions(actions, previous_text, transcript_text):
+    """Remove actions copied verbatim out of last meeting's minutes.
+
+    A real February meeting came back with January's two action items as its
+    own, word for word, from a recording that never mentions them. House style
+    already says where a still-outstanding task belongs: inside its Perkara
+    Berbangkit item, reported on - not reissued at the foot of this month's
+    minutes as though it were assigned today. So an action that is a near copy
+    of a line in the attached minutes is dropped from action_items.
+
+    Deliberately narrow. It matches near-identical wording only, so a task the
+    meeting genuinely raised in its own words is untouched, and it does nothing
+    at all unless previous minutes were attached.
+    """
+    from difflib import SequenceMatcher
+    prev_lines = [_norm_task(l) for l in (previous_text or "").splitlines()]
+    prev_lines = [l for l in prev_lines if len(l) > 12]
+    if not prev_lines:
+        return actions
+    kept, dropped = [], []
+    for a in actions:
+        task = _norm_task(a.get("task") if isinstance(a, dict) else a)
+        if len(task) <= 12:
+            kept.append(a)
+            continue
+        hit = False
+        for line in prev_lines:
+            # A short task can sit inside a longer table row with its owner
+            # and deadline, so test containment as well as whole-line ratio.
+            if task in line or SequenceMatcher(None, task, line).ratio() >= 0.88:
+                hit = True
+                break
+        (dropped if hit else kept).append(a)
+    if dropped:
+        logging.info("cloud: %d action(s) were last meeting's, left to Perkara "
+                     "Berbangkit: %s", len(dropped),
+                     "; ".join(_norm_task(d.get("task"))[:50] for d in dropped))
+    return kept
+
+
 def _one_pass(transcript_text, data_dir, system_prompt, schema, max_retries=4):
     """Summarise via Groq, with the same JSON schema the local engine uses,
     so the document generators see an identical shape either way."""
@@ -592,6 +637,16 @@ def analyze(transcript_text, data_dir, system_prompt, schema,
     # subject or two. When a meeting still looks over-fragmented, ask the model
     # once - text only, so it barely touches the free tier - and accept the
     # answer only if it is strictly a folding of what we already had.
+    # Telling the summariser that last month's file is background was not
+    # enough. A real run produced a February meeting whose only two action
+    # items were January's, copied word for word, when February's recording
+    # never says "borang", "surat" or "kelulusan" at all. So check rather than
+    # ask: an action that is already in the old minutes has to be supported by
+    # something actually said in this recording, or it does not belong here.
+    if prev and data.get("action_items"):
+        data["action_items"] = _drop_echoed_actions(
+            data["action_items"], prev, text)
+
     if names:
         data["attendees"] = names
     if (lang or "").lower() in ("en", "ms", "zh"):

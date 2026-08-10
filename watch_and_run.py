@@ -1440,12 +1440,25 @@ def normalise_analysis(data):
     # no title at all, so everything downstream said "Minit Mesyuarat" or, in
     # one case, "Done". Borrow the first agenda topic instead of shipping a
     # blank - it is always more use than nothing.
+    # Skip the matters-arising items when borrowing one. They are prepended,
+    # so the first agenda item in a meeting with previous minutes attached is
+    # always a carry-over - which produced real minutes headed "Perkara
+    # Berbangkit: Pelantikan Pemeriksa Luar dan Dalam", naming a February
+    # meeting after an unfinished item from January.
     if not data["meeting_title"]:
-        for item in _as_list(data.get("agenda_items")):
-            topic = _as_text(
-                item.get("topic") if isinstance(item, dict) else item).strip()
-            if topic:
+        for want_fresh in (True, False):
+            for item in _as_list(data.get("agenda_items")):
+                topic = _as_text(
+                    item.get("topic") if isinstance(item, dict) else item).strip()
+                if not topic:
+                    continue
+                carried = topic.lower().startswith(("perkara berbangkit",
+                                                    "matters arising"))
+                if want_fresh and carried:
+                    continue
                 data["meeting_title"] = topic[:80]
+                break
+            if data["meeting_title"]:
                 break
 
     data["attendees"], _name_warnings = _clean_attendees(

@@ -801,6 +801,41 @@ check("The meeting is not titled after a matter arising",
 check("Attendance is this meeting's, not last month's",
       "only people present at THIS meeting" in _prevblock)
 
+
+# --------------------------------------- an old action is not a new action
+# A real February run came back with January's two action items as its own,
+# copied word for word, from a recording that never mentions them. House
+# style puts a still-outstanding task inside its Perkara Berbangkit item,
+# reported on - not reissued at the foot of this month's minutes.
+_PREV_MIN = ("TINDAKAN\n"
+             "Menghantar borang notis dan peribadi | Dr. Hafizah | 31 Januari\n"
+             "Menghantar surat kelulusan kepada pelajar | PASCA |")
+_TRANS_2 = "notis seratisis dari pelajar. Prof akan menyemak senarai penyelia."
+_ACTS = [{"task": "Menghantar borang notis dan peribadi"},
+         {"task": "Menghantar surat kelulusan kepada pelajar"},
+         {"task": "Menyemak senarai penyelia bagi pelajar baharu"}]
+_kept = [a["task"] for a in
+         A.cloud._drop_echoed_actions(_ACTS, _PREV_MIN, _TRANS_2)]
+check("Last meeting's actions do not reappear as this meeting's",
+      "Menghantar borang notis dan peribadi" not in _kept
+      and "Menghantar surat kelulusan kepada pelajar" not in _kept)
+check("This meeting's own action survives",
+      "Menyemak senarai penyelia bagi pelajar baharu" in _kept)
+check("With no previous minutes nothing is touched",
+      len(A.cloud._drop_echoed_actions(_ACTS, "", _TRANS_2)) == 3)
+
+# The title fallback borrows the first agenda topic. Matters arising are
+# prepended, so it named a February meeting after an unfinished January item.
+_d = {"meeting_title": "", "agenda_items": [
+        {"topic": "Perkara Berbangkit: Pelantikan Pemeriksa"},
+        {"topic": "Notis Seratisis: Dayang Siti Norafidah"}],
+      "action_items": [], "attendees": [], "important_notes": []}
+_d = A.engine.normalise_analysis(_d)
+check("A meeting is not named after a matter arising",
+      not (_d.get("meeting_title") or "").lower().startswith("perkara berbangkit"))
+check("It borrows the first real agenda item instead",
+      _d.get("meeting_title", "").startswith("Notis Seratisis"))
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.
