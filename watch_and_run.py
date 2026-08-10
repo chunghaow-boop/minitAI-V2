@@ -2140,7 +2140,37 @@ def extract_text_from_file(path):
         elif ext == ".docx":
             from docx import Document as _D
             doc = _D(path)
-            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            # Read paragraphs AND tables, in the order they appear in the
+            # document. Minutes put the things that matter most in tables -
+            # the action list with its owners and deadlines, and the title
+            # block. Reading only paragraphs silently dropped all of them,
+            # so attaching last month's minutes handed the summariser the
+            # discussion with every outstanding action removed, which is
+            # exactly the part Perkara Berbangkit exists to carry forward.
+            from docx.table import Table as _T
+            from docx.text.paragraph import Paragraph as _P
+            out = []
+            for child in doc.element.body.iterchildren():
+                tag = child.tag.split('}')[-1]
+                if tag == "p":
+                    t = _P(child, doc).text.strip()
+                    if t:
+                        out.append(t)
+                elif tag == "tbl":
+                    for row in _T(child, doc).rows:
+                        # The signature block at the foot is dotted rules and
+                        # empty name/date labels - noise in a summariser prompt.
+                        if "......" in row.cells[0].text:
+                            continue
+                        cells = []
+                        for c in row.cells:
+                            v = c.text.strip()
+                            # A signature block is a row of dotted rules.
+                            if v and v.strip(". …\n"):
+                                cells.append(" ".join(v.split()))
+                        if cells:
+                            out.append(" | ".join(cells))
+            text = "\n".join(out)
         elif ext in (".txt", ".md"):
             with open(path, encoding="utf-8", errors="ignore") as f:
                 text = f.read()

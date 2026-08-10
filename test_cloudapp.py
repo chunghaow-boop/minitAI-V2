@@ -752,6 +752,36 @@ check("Interface is one language: " + (", ".join(_malay_ui) or "clean"), not _ma
 check("The user can still choose the document language",
       'id="lang"' in _ui and 'value="ms"' in _ui)
 
+# ------------------------------------------- last meeting's minutes, in full
+# Minutes keep the action list in a Word TABLE - the task, who owns it, when
+# it is due. The reader only walked paragraphs, so attaching last month's
+# minutes handed the summariser the discussion with every outstanding action
+# stripped out, which is the one thing Perkara Berbangkit exists to carry.
+def _prev_docx_roundtrip():
+    import tempfile, json as _j
+    data = {"meeting_title": "Mesyuarat Bil 1/2026", "attendees": ["Dr. Hafizah"],
+            "agenda_items": [{"topic": "Geran", "discussion": "Dibincangkan.",
+                              "decision": "Diluluskan."}],
+            "action_items": [{"task": "Menghantar borang geran",
+                              "owner": "Dr. Hafizah", "deadline": "31 Januari"}],
+            "important_notes": []}
+    d = tempfile.mkdtemp()
+    out = os.path.join(d, "prev.docx")
+    A.engine.gen_docx(data, out)
+    return A.engine.extract_text_from_file(out) or ""
+
+try:
+    _txt = _prev_docx_roundtrip()
+except Exception as _e:                                    # pragma: no cover
+    _txt = ""
+    check("Previous minutes can be read back at all: %s" % _e, False)
+check("Previous minutes keep the action itself", "Menghantar borang geran" in _txt)
+check("Previous minutes keep who owns it", "Dr. Hafizah" in _txt)
+check("Previous minutes keep the deadline", "31 Januari" in _txt)
+check("Previous minutes keep the discussion", "Diluluskan" in _txt)
+check("Previous minutes drop the empty signature block",
+      "Disediakan" not in _txt)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.
