@@ -1164,6 +1164,11 @@ def index():
 PAGE = """<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MinitAI</title>
+<!-- The mark: a clock whose minute hand is also the ruled line of a page.
+     Minit is both the minute and the minutes. Inlined rather than served
+     as a file, because the free instance wipes its disk when it sleeps. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImJnIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjAiIHkxPSIwIiB4Mj0iNjQiIHkyPSI2NCI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjNEM3REYwIi8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjOEI1Q0Y2Ii8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9InVybCgjYmcpIi8+PGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMzIsMzIpIHNjYWxlKDAuNzQpIHRyYW5zbGF0ZSgtMzIsLTMyKSI+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZGRkZGIiBzdHJva2Utd2lkdGg9IjQuNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj48Y2lyY2xlIGN4PSIzMiIgY3k9IjMyIiByPSIyMiIvPjxwYXRoIGQ9Ik0xOSAyNC41IEgyOCIvPjxwYXRoIGQ9Ik0xOSAzOS41IEgyOCIvPjxwYXRoIGQ9Ik0zMiAzMiBINDUiLz48cGF0aCBkPSJNMzIgMzIgVjIwIi8+PC9nPjwvZz48L3N2Zz4=">
+<link rel="apple-touch-icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImJnIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjAiIHkxPSIwIiB4Mj0iNjQiIHkyPSI2NCI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjNEM3REYwIi8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjOEI1Q0Y2Ii8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9InVybCgjYmcpIi8+PGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMzIsMzIpIHNjYWxlKDAuNzQpIHRyYW5zbGF0ZSgtMzIsLTMyKSI+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZGRkZGIiBzdHJva2Utd2lkdGg9IjQuNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj48Y2lyY2xlIGN4PSIzMiIgY3k9IjMyIiByPSIyMiIvPjxwYXRoIGQ9Ik0xOSAyNC41IEgyOCIvPjxwYXRoIGQ9Ik0xOSAzOS41IEgyOCIvPjxwYXRoIGQ9Ik0zMiAzMiBINDUiLz48cGF0aCBkPSJNMzIgMzIgVjIwIi8+PC9nPjwvZz48L3N2Zz4=">
 <style>
 :root{--bg:#0A0E1A;--card:#151B2C;--card2:#1A2236;--line:#252E44;--txt:#E8ECF5;
 --muted:#8B94A9;--blue:#4C82F7;--green:#34D399;--amber:#FBBF24;--red:#F87171;
@@ -1183,6 +1188,9 @@ background:
   var(--bg);
 background-attachment:fixed}
 .wrap{width:100%;max-width:620px}
+h1.hasmark{display:flex;align-items:center;gap:11px}
+.mark{flex:none}
+@media(max-width:520px){.mark{width:28px;height:28px}}
 h1{font-family:var(--fd);font-size:30px;letter-spacing:-.7px;margin-bottom:5px;
 line-height:1.15}
 h1 .brand{background:linear-gradient(96deg,#F2F6FF 0%,#A9C6FF 52%,#9C8CF8 100%);
@@ -1483,7 +1491,7 @@ font-size:13px;padding:8px;font-family:inherit;margin-bottom:6px}
 #editForm h4{font-size:12px;color:var(--muted);margin:16px 0 2px;
 text-transform:uppercase;letter-spacing:.4px}
 </style></head><body><div class="wrap">
-<h1><span class="brand">MinitAI</span><span id="h1name"
+<h1 class="hasmark"><svg viewBox="0 0 64 64" width="34" height="34" class="mark" aria-hidden="true"><defs><linearGradient id="wmg" gradientUnits="userSpaceOnUse" x1="10" y1="10" x2="54" y2="54"><stop offset="0" stop-color="#6C9BFF"/><stop offset="1" stop-color="#A78BFA"/></linearGradient></defs><g fill="none" stroke="url(#wmg)" stroke-width="3.8" stroke-linecap="round"><circle cx="32" cy="32" r="22"/><path d="M19 24.5 H28"/><path d="M19 39.5 H28"/><path d="M32 32 H45"/><path d="M32 32 V20"/></g></svg><span class="brand">MinitAI</span><span id="h1name"
   style="font-weight:400;color:var(--muted)"></span></h1>
 <div class="sub">Meeting audio in. Professional minutes out.</div>
 

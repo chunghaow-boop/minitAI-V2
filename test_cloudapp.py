@@ -896,6 +896,20 @@ check("It is still there", "Kolananie" in _p3)
 check("It never leaves the browser",
       "function forHer" in _p3 and "forHer(); return;" in _p3)
 
+
+# ------------------------------------------------------------------ the mark
+# A clock whose minute hand is also the ruled line of a page: minit is both
+# the minute and the minutes. Inlined rather than served as a file, because
+# the free instance wipes its disk whenever it sleeps and a logo that
+# disappears on a cold start is worse than no logo.
+_pm = client().get("/").data.decode()
+check("The mark is in the page", 'class="mark"' in _pm)
+check("The mark is drawn, not fetched",
+      "<circle cx=\"32\" cy=\"32\"" in _pm)
+check("There is a favicon and it needs no file on disk",
+      'rel="icon"' in _pm and "data:image/svg+xml;base64," in _pm)
+check("A phone gets a home-screen icon too", 'apple-touch-icon' in _pm)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.
