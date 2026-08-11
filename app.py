@@ -1317,6 +1317,55 @@ list-style:none}
 #adv>summary::-webkit-details-marker{display:none}
 #adv>summary::after{content:'\u00a0\u25be';float:right}
 #adv[open]>summary::after{content:'\u00a0\u25b4'}
+
+/* ================= the wide layout =================
+   On a laptop the page was one narrow column with empty space either side,
+   and the options that matter most - the names it should know, who was there -
+   were folded away inside a panel nobody opened. On a wide screen the card
+   becomes three columns: history on the left, the meeting in the middle, and
+   the options permanently open on the right. Below 1180px none of this
+   applies and the page is exactly what it was, stacked in the order a phone
+   wants: record first, options next, history last. */
+#colL,#colC,#colR{display:block}
+@media (min-width:1180px){
+  body.wide .wrap{max-width:1360px}
+  body.wide #appCard{display:grid;align-items:start;column-gap:18px;row-gap:0;
+    grid-template-columns:286px minmax(0,1fr) 318px;padding:20px}
+  body.wide #colL{grid-column:1}
+  body.wide #colC{grid-column:2}
+  body.wide #colR{grid-column:3}
+  body.wide #micGate{grid-column:1 / -1}
+  body.wide #cardFoot,body.wide #priv{grid-column:1 / -1;margin-top:6px}
+  /* Before the first meeting there is no history, and a reserved empty
+     gutter looks like something failed to load. Drop to two columns until
+     there is something to put there. */
+  body.wide.no-left #appCard{grid-template-columns:minmax(0,1fr) 318px}
+  body.wide.no-left .wrap{max-width:1120px}
+  body.wide.no-left #colC{grid-column:1}
+  body.wide.no-left #colR{grid-column:2}
+  body.wide #colL,body.wide #colR{display:flex;flex-direction:column;gap:14px}
+  /* each side block reads as its own panel */
+  body.wide .side{background:linear-gradient(180deg,rgba(255,255,255,.035),transparent),
+    var(--card2);border:1px solid var(--line);border-radius:14px;padding:15px;
+    opacity:0;transform:translateY(10px);animation:sideRise .45s cubic-bezier(.2,.7,.3,1) forwards}
+  body.wide .side:nth-child(2){animation-delay:.06s}
+  body.wide .side:nth-child(3){animation-delay:.12s}
+  body.wide .side > label:first-child,body.wide .side > .sideh{margin-top:0}
+  /* the options panel stops being a fold-away */
+  body.wide #adv{background:transparent;border:0;padding:0;margin:0}
+  body.wide #adv > summary{display:none}
+  body.wide #colR > label:first-child{margin-top:0}
+  body.wide .sideh{display:block}
+  /* the centre keeps the brand edge so the eye knows where the work happens */
+  body.wide #colC{position:relative}
+}
+@keyframes sideRise{to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){
+  body.wide .side{animation:none;opacity:1;transform:none}
+}
+/* a heading for each side panel */
+.sideh{display:none;font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--muted);font-weight:700;margin:0 0 10px}
 /* --- the wait --- */
 #build{margin-top:12px}
 #buildDoc{background:#0E1424;border:1px solid var(--line);border-radius:12px;
@@ -1349,7 +1398,7 @@ list-style:none}
 /* While it works, the recorder and the drop zone are dead weight - the same
    mistake the finished screen used to make. The document being built takes
    the page, and the stage line under it is the only status text needed. */
-#appCard.showing-work{display:flex;flex-direction:column}
+#appCard.showing-work #colC{display:flex;flex-direction:column}
 #appCard.showing-work #inputZone{display:none}
 #appCard.showing-work #quotaChip{order:0}
 #appCard.showing-work #barWrap{order:1;margin-top:6px}
@@ -1362,7 +1411,7 @@ list-style:none}
    above the result, so the documents someone had just waited for sat eight
    hundred pixels down the page and they had to scroll past the form they had
    already used. Once there is a result, the result IS the page. */
-#appCard.showing-result{display:flex;flex-direction:column}
+#appCard.showing-result #colC{display:flex;flex-direction:column}
 #appCard.showing-result #inputZone{display:none}
 #appCard.showing-result #quotaChip{order:0}
 #appCard.showing-result #msg{order:1;font-size:17px;font-weight:600;
@@ -1809,6 +1858,62 @@ function fmt(s){
   var m=Math.floor(s/60), r=s%60;
   return m+':'+(r<10?'0':'')+r;
 }
+
+// --- three columns on a wide screen ---------------------------------------
+// Nothing here is new or moved on a phone. The blocks are the ones that were
+// already on the page - the recorder, the options panel, the history - just
+// dealt into columns when there is room for them, so the options that decide
+// the quality of the minutes stop being folded away where nobody looks.
+(function(){
+  var card=$('appCard'); if(!card || $('colC')) return;
+  function box(id){ var d=document.createElement('div'); d.id=id; return d; }
+  var C=box('colC'), R=box('colR'), L=box('colL');
+  // DOM order is centre, options, history: that is the order a phone should
+  // read them in when the columns collapse back into one.
+  card.appendChild(C); card.appendChild(R); card.appendChild(L);
+
+  function take(el,to){ if(el) to.appendChild(el); }
+  var iz=$('inputZone');
+  // centre: everything about doing the meeting
+  ['quotaChip','newMeeting','barWrap','build','msg','preview','fixNames','files',
+   'editOpen','driveWrap'].forEach(function(id){ take($(id),C); });
+  // the recorder and the drop zone come out of the input zone, which stays
+  // wrapped so "hide the form while working" still works untouched
+  take(iz,C);
+  // right: how it should be written up
+  var langLabel=iz && iz.querySelector('label[for="lang"]');
+  var head=document.createElement('div');
+  head.className='sideh'; head.textContent='How to write it up';
+  R.appendChild(head);
+  take(langLabel,R); take($('lang'),R); take($('adv'),R);
+  // left: what you already have
+  ['recentWrap','drivePast'].forEach(function(id){ take($(id),L); });
+  // The footer is not part of the centre column - on a phone that put the
+  // sign-out link and the privacy notes in the middle of the page, above the
+  // options. It stays a child of the card and sits last in both layouts.
+  take($('cardFoot'),card); take($('priv'),card);
+
+  function panels(){
+    var wide=window.matchMedia('(min-width:1180px)').matches;
+    document.body.classList.toggle('wide', wide);
+    // A folded panel on a phone, an open one on a laptop.
+    if($('adv')) $('adv').open = wide ? true : $('adv').open;
+    // Side blocks only become panels when they have something in them - an
+    // empty "your meetings" box on someone's first day is worse than nothing.
+    [['recentWrap',L],['drivePast',L]].forEach(function(x){
+      var el=$(x[0]); if(!el) return;
+      el.classList.toggle('side', wide && !el.classList.contains('hide'));
+    });
+    R.classList.toggle('side', wide);
+    var haveHistory = !!L.querySelector(':scope > :not(.hide)');
+    L.style.display = (wide && !haveHistory) ? 'none' : '';
+    document.body.classList.toggle('no-left', wide && !haveHistory);
+  }
+  panels();
+  window.addEventListener('resize', panels);
+  // history appears after the first meeting, so re-check when it loads
+  window.MINITAI_PANELS=panels;
+})();
 
 // --- surviving a crash ----------------------------------------------------
 // MediaRecorder was already flushing every five seconds, but only into a
@@ -3116,6 +3221,8 @@ async function loadMe(){const {j}=await api('/me');
   try{ $('driveAuto').checked = localStorage.getItem('minitai.driveAuto')==='1'; }catch(e){}}
 
 async function loadRecent(){
+  // new history may mean the left column now has something to show
+  setTimeout(function(){ if(window.MINITAI_PANELS) window.MINITAI_PANELS(); },120);
   const {ok,j}=await api('/recent'); if(!ok||!j)return;
   const f=j.files||[];
   $('recentWrap').classList.toggle('hide',f.length===0);
