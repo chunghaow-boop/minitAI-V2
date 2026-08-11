@@ -879,6 +879,23 @@ check("Rebuilding keeps the transcript in the download list",
 check("The correction reaches the decoder, not just the summariser",
       "before transcription" in open("app.py", encoding="utf-8").read())
 
+
+# ------------------------------------------------------ examples and secrets
+# The examples in the empty fields were a real university, a real faculty and
+# three real people from an actual committee. An example is not a placeholder
+# if it names someone.
+_p3 = client().get("/").data.decode()
+check("No real institution in the example names",
+      "UMS, FSSK" not in _p3)
+check("No real people in the attendance example",
+      "Dr. Hafizah&#10;Prof" not in _p3 and "Prof. Madya Dr. Maurin" not in _p3)
+check("The examples still show the shape expected",
+      "Bil 1/2026" in _p3)
+# And the one part of this that is not about committees.
+check("It is still there", "Kolananie" in _p3)
+check("It never leaves the browser",
+      "function forHer" in _p3 and "forHer(); return;" in _p3)
+
 # ------------------------------------------------------------- keep awake
 # Sleeping is not just a slow first request: it erases the disk that holds
 # everyone's daily allowance, so the instance has to stay up during the day.

@@ -1564,7 +1564,7 @@ text-transform:uppercase;letter-spacing:.4px}
   <label for="hints">Names it might not know (optional)</label>
   <div class="note" style="margin:0 0 6px">
     Abbreviations, course codes, anything unusual.</div>
-  <input id="hints" placeholder="e.g. UMS, FSSK, Dr Aminah, Prof Lim, Bil 1/2026">
+  <input id="hints" placeholder="e.g. Bil 1/2026, Jawatankuasa Induk, KPI, Puan Aisyah">
 
   <label for="prev">Last meeting's minutes (optional)</label>
   <div class="note" style="margin:0 0 6px">Opens the summary with
@@ -1586,7 +1586,7 @@ text-transform:uppercase;letter-spacing:.4px}
   <div class="note" style="margin:0 0 6px">One per line. Fills the attendance
     list and fixes the spelling.</div>
   <textarea id="roster" rows="3"
-    placeholder="Dr. Hafizah&#10;Prof. Madya Dr. Maurin&#10;Puan Marja"
+    placeholder="Puan Aisyah&#10;Encik Rahman&#10;Cik Farah"
     style="width:100%;background:var(--card2);border:1px solid var(--line);
            border-radius:10px;color:var(--txt);font-size:14px;padding:11px;
            font-family:inherit;resize:vertical"></textarea>
@@ -2245,9 +2245,50 @@ $('helpBubble').onclick=function(){
   }
 };
 $('helpClose').onclick=function(){ $('helpPanel').classList.add('hide'); };
+// ---------------------------------------------------------------- for her
+// MinitAI was built for Kolananie Justin. Everything else here is about
+// committees and deadlines; this is the one part that is not. Type her name
+// into the help box and it stops being a support bot for a moment.
+// Nothing leaves the browser - no server call, no logging, no trace in the
+// transcript. Just a message that has always been waiting to be found.
+var HER=['kolananie','kolanie','nanie','kola nanie','kolananie justin'];
+function forHer(){
+  var box=$('helpLog');
+  var d=document.createElement('div');
+  d.className='a';
+  d.style.cssText='background:linear-gradient(135deg,rgba(244,114,182,.16),'
+    +'rgba(167,139,250,.16));border:1px solid rgba(244,114,182,.45);'
+    +'border-radius:12px;padding:12px 13px;line-height:1.65';
+  d.innerHTML='<b style="color:#FDA4C8">For Kolananie Justin \u2764</b><br>'
+    +'Gavril built MinitAI so the people he loves would stop losing their '
+    +'evenings to typing up meetings.<br><br>'
+    +'He built it first for you.<br><br>'
+    +'<span style="color:#94A0BC;font-size:12px">Every meeting this thing has '
+    +'ever written up was practice for giving you your time back.</span>';
+  box.appendChild(d); box.scrollTop=box.scrollHeight;
+  // a few hearts, then gone
+  for(var i=0;i<9;i++){
+    (function(n){ setTimeout(function(){
+      var h=document.createElement('div');
+      h.textContent='\u2764';
+      h.style.cssText='position:fixed;left:'+(8+Math.round((n*11)%80))+'vw;bottom:-30px;'
+        +'font-size:'+(15+(n%4)*6)+'px;color:#F472B6;pointer-events:none;z-index:99;'
+        +'opacity:.9;transition:transform 3.2s linear, opacity 3.2s linear';
+      document.body.appendChild(h);
+      requestAnimationFrame(function(){
+        h.style.transform='translateY(-'+(60+(n%5)*8)+'vh) rotate('+((n%2?1:-1)*22)+'deg)';
+        h.style.opacity='0';
+      });
+      setTimeout(function(){ h.remove(); },3400);
+    }, n*130); })(i);
+  }
+}
+
 $('helpBtn').onclick=async function(){
   var q=$('helpQ').value.trim(); if(!q) return;
   helpSay('q','You: '+q); $('helpQ').value='';
+  var low=q.toLowerCase().replace(/[^a-z ]/g,'');
+  if(HER.some(function(n){ return low.indexOf(n)>-1; })){ forHer(); return; }
   var waiting=helpSay('a','Thinking\u2026');
   try{
     var r=await fetch('/help',{method:'POST',headers:{'Content-Type':'application/json'},
